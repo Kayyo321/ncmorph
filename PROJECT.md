@@ -1,6 +1,6 @@
 # ncmorph
 
-Scope, architecture, decisions and open questions are not written yet.
+ncmorph converts an open-weight, decoder-only language model into a Next-Concept Modeling (NCM) model. This file is the specification: scope, the pinned NCM reference, the supported source families, milestones and gates, decisions, open questions and research findings. [AGENTS.md](AGENTS.md) holds the rules for working in the repository.
 
 ## Source file header
 
@@ -217,9 +217,3 @@ Pending. The deep-research run (`wf_3a9de5f1-8b7`) was still fetching sources wh
 - HazyResearch/ncm, commit `c70274273f489abc73832b2b98584a8483b6b203`.
 - arXiv:2610.14162.
 - The model repositories and configs listed under Supported source families.
-
-Zig has no block comments. The Zig language reference says there are no multiline comments, and `/* */` is a parse error. In `.zig` files, write the same text as a line comment:
-
-```
-// Ko, (Baczynski-Bruce) 2026; Apache 2.0
-```
