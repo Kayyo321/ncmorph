@@ -33,7 +33,7 @@ pub const result_t = struct {
     notes: []const config.problem_t,
 };
 
-const GroupKind = enum { Missing, Shape, Dtype, Unexpected, Duplicate };
+const GroupKind = enum { Missing, Shape, Dtype, Unexpected, Noncanonical, Duplicate };
 
 /// All occurrences of one problem, so that one feature gives one problem.
 const group_t = struct {
@@ -113,6 +113,7 @@ fn add_template(
 
 const layer_name_t = struct {
     layer: u64,
+    layer_text: []const u8,
     suffix: []const u8,
 };
 
@@ -123,7 +124,7 @@ fn split_layer_name(name: []const u8) ?layer_name_t {
     const rest = name[prefix.len..];
     const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
     const layer = std.fmt.parseInt(u64, rest[0..dot], 10) catch return null;
-    return .{ .layer = layer, .suffix = rest[dot + 1 ..] };
+    return .{ .layer = layer, .layer_text = rest[0..dot], .suffix = rest[dot + 1 ..] };
 }
 
 fn find_template(list: []const template_t, pattern: []const u8, per_layer: bool) ?usize {
@@ -172,6 +173,7 @@ fn to_problem(arena: Allocator, group: group_t) !config.problem_t {
         .Shape => try std.fmt.allocPrint(arena, "shape mismatch ({s}): {d} tensor(s), first {s}", .{ group.detail, group.count, group.sample }),
         .Dtype => try std.fmt.allocPrint(arena, "dtype {s} is not supported (expected BF16, F16 or F32): {d} tensor(s), first {s}", .{ group.detail, group.count, group.sample }),
         .Unexpected => try std.fmt.allocPrint(arena, "not expected for this configuration: {d} tensor(s), first {s}", .{ group.count, group.sample }),
+        .Noncanonical => try std.fmt.allocPrint(arena, "noncanonical layer index; use the decimal layer number without leading zeroes: {s}", .{group.sample}),
         .Duplicate => try std.fmt.allocPrint(arena, "appears more than once, first {s}", .{group.sample}),
     };
     return .{ .feature = group.feature, .message = message };
@@ -194,6 +196,12 @@ pub fn check(arena: Allocator, spec: config.spec_t, present: []const safetensors
         var index: ?usize = null;
         var layer: usize = 0;
         if (split_layer_name(tensor.name)) |parsed| {
+            const canonical_layer_text = try std.fmt.allocPrint(arena, "{d}", .{parsed.layer});
+            if (!std.mem.eql(u8, parsed.layer_text, canonical_layer_text)) {
+                const feature = try std.fmt.allocPrint(arena, "model.layers.{{i}}.{s}", .{parsed.suffix});
+                try add_group(arena, &groups, .Noncanonical, feature, tensor.name, "");
+                continue;
+            }
             if (find_template(list, parsed.suffix, true)) |found| {
                 if (parsed.layer < spec.num_hidden_layers) {
                     index = found;
