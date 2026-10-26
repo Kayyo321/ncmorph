@@ -1,0 +1,48 @@
+# Zig build outputs and local caches
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Model weights and converter output: large, downloaded or generated, never committed
+/models/
+/weights/
+/converted/
+/out/
+/.cache/
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# Python helper tooling, if any scripts are added
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Native and debug artifacts from C interop, macOS and profiling
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+*.trace/
+perf.data*
+
+# Secrets and per-user settings
+.env
+.env.*
+!.env.example
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Editors and OS metadata
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo

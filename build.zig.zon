@@ -1,0 +1,19 @@
+.{
+    // Name used by packages that depend on this one, such as `zig fetch --save`.
+    .name = .ncmorph,
+    .version = "0.0.0",
+    // Generated once by `zig init` for this package name. Keep it unchanged.
+    .fingerprint = 0xf141ed3987fbf930,
+    // The earliest Zig version this package supports.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    // Files that belong to the package, which the content hash covers.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "packages",
+        "LICENSE",
+        "README.md",
+    },
+}
