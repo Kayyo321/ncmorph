@@ -13,6 +13,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("packages/bf16/root.zig"),
         .target = target,
     });
+    const kernels = b.addModule("kernels", .{
+        .root_source_file = b.path("packages/kernels/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{.{ .name = "bf16", .module = bf16 }},
+    });
+    if (target.result.os.tag == .linux) kernels.linkSystemLibrary("m", .{});
     const unicode_categories = b.addModule("unicode_categories", .{
         .root_source_file = b.path("packages/unicode_categories/root.zig"),
         .target = target,
@@ -28,6 +35,24 @@ pub fn build(b: *std.Build) void {
             .{ .name = "safetensors", .module = safetensors },
         },
     });
+    const decoder = b.addModule("decoder", .{
+        .root_source_file = b.path("src/decoder.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "hf_config", .module = hf_config },
+            .{ .name = "kernels", .module = kernels },
+        },
+    });
+    const loader = b.addModule("loader", .{
+        .root_source_file = b.path("src/loader.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "bf16", .module = bf16 },
+            .{ .name = "decoder", .module = decoder },
+            .{ .name = "hf_config", .module = hf_config },
+            .{ .name = "safetensors", .module = safetensors },
+        },
+    });
 
     const exe = b.addExecutable(.{
         .name = "ncmorph",
@@ -38,6 +63,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "safetensors", .module = safetensors },
                 .{ .name = "hf_config", .module = hf_config },
+                .{ .name = "decoder", .module = decoder },
+                .{ .name = "loader", .module = loader },
             },
         }),
     });
@@ -45,14 +72,12 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the ncmorph command-line tool");
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
-    const library_modules = [_]*std.Build.Module{ bf16, unicode_categories, safetensors, hf_config };
+    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, loader };
     for (library_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);

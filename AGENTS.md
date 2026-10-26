@@ -33,13 +33,15 @@ If you cannot verify something, research it until it is verified, and cite the s
 
 ## Toolchain
 
-- Zig 0.16.0 is the target. Check the active version with `zig version`.
+- Zig 0.17.0 is the target from Z1 onward. Check the active version with `zig version`.
 - Before you call any `std` function, grep the standard library at `zig env`'s `std_dir`. Do not trust remembered signatures.
-- Zig 0.16 differs from older releases. These points were verified against the 0.16.0 standard library:
+- Zig 0.17 differs from earlier releases. These points were verified against the 0.17.0 compiler and standard library:
   - There is no `std.io` namespace. The I/O namespace is `std.Io`.
   - `std.ArrayList(T)` is unmanaged. Start from `.empty` or `initCapacity(gpa, n)`, and pass the allocator to `append`, `deinit` and `toOwnedSlice`.
   - `main` may take a `std.process.Init` (or `Init.Minimal`) parameter. Check `callMain` in `start.zig` before you write an entry point.
   - Comments are `//`, `///` and `//!` only. `/* */` is a parse error.
+  - Build scripts pass arguments to run steps with `Run.addPassthruArgs()`; `Build.args` was removed.
+  - Array multiplication syntax such as `[_]T{value} ** count` was removed; use an explicit array or initialize elements in a loop.
 - Formatting: `zig fmt --check .` lists non-conforming files and exits non-zero. Run `zig fmt .` to fix them.
 
 ## Commands

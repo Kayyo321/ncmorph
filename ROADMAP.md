@@ -23,9 +23,9 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 | Phase | Milestone | Status |
 |---|---|---|
 | 1 | M0a `inspect` | Done |
-| 2 | M0b source decoder in F32 | Next: step B0a |
+| 2 | M0b source decoder in F32 | Done |
 | 3 | M0c real checkpoints | Not started |
-| 4 | Z1 Zig upgrade | Not started. Runs after M0c |
+| 4 | Z1 Zig upgrade | Done after M0c |
 | 5 | M1 NCM dialect | Not started |
 | 6 | M2 transplant | Not started |
 | 7 | Tokenizers T0, T1, T2 | Not started |
@@ -66,59 +66,59 @@ Goal: one decoder core, configured by flags, that runs a source model on the CPU
 
 Gate: logits match transformers v5.20.2 on tiny random models, one per family in scope, generated with fixed seeds, within the bounds of decision D53.
 
-**B0a. Accept the transformers v5 `rope_parameters` key.** Status: next.
+**B0a. Accept the transformers v5 `rope_parameters` key.** Status: done.
 - Depends on: phase 1.
 - Why: the installed transformers 5.14.1 writes `rope_parameters` (for example `{"rope_theta": 10000.0, "rope_type": "default"}`) and no top-level `rope_theta` when it saves a config. `packages/hf_config/config.zig` rejects that key with "only rope_scaling is read in this version" (lines 315 and 316). Step B0 confirms that the pinned v5.20.2 writes the same key.
 - Work: read `rope_parameters` when `rope_scaling` is absent, with its `rope_type`, `rope_theta` and the llama3 fields. If both keys are present and disagree, report a named error. A config in either form gives the same spec.
 - Done when: a unit test shows that a config in the `rope_parameters` form gives the same spec as its legacy form; `inspect` on a directory holding such a config reports no error for the key; `zig build test` passes with the new test counted; `zig fmt --check .` is clean.
 
-**B0. Golden helper, pins and bounds.** Status: not started.
+**B0. Golden helper, pins and bounds.** Status: done.
 - Depends on: B0a.
 - Work: the helper is `tools/golden_helper.py` (its name is fixed here). Its environment is built from `tools/requirements-golden.txt`, which lists the pins of PROJECT.md: `torch==2.13.0`, `transformers==5.20.2`, `tokenizers==0.23.3`, `safetensors==0.8.0`, on Python 3.13. The helper checks the installed versions and refuses to run when one is missing or different. For fixed seeds it writes tiny random models per family (`config.json` and safetensors, in a build cache, not committed) and the reference values as JSON: RoPE tables, layer outputs, and logits for fixed token ids.
 - Done when: two runs with the same seed give identical files; the helper refuses to run with a wrong pin; and B0 records the version of `rope_parameters` that the pinned transformers writes (step B0a depends on it).
 
-**B1. Matrix multiply** (`packages/kernels`). Status: not started.
+**B1. Matrix multiply** (`packages/kernels`). Status: done.
 - Depends on: phase 1.
 - Work: row-major f32 `y = x Wᵀ`, with `x` of shape `[T, in]`, `W` stored as `[out, in]` (as in the safetensors header), and `y` of shape `[T, out]`. Write the plain loop first. It stays in the tests as the reference for the blocked version, which comes second.
 - Wiring: create `packages/kernels/root.zig` with the header and a `//!` doc comment. Register it in `build.zig` with `b.addModule("kernels", ...)` and add it to `library_modules`. Without that, `zig build test` runs no tests for the package, because the test loop covers only `library_modules`.
 - Done when: (a) hand-checked small matrices pass; (b) for fixed seeds (`std.Random.Xoshiro256`, with the seed written in the test), including `T = 1` and an inner dimension that the block size does not divide, every output satisfies the D53 bound against an f64 reference computed in the test; (c) the package imports nothing from ncmorph or NCM (the grep check in AGENTS.md); (d) `zig build test` passes with more than 40 tests.
 
-**B2. Elementwise and reduction kernels** (`packages/kernels`). Status: not started.
+**B2. Elementwise and reduction kernels** (`packages/kernels`). Status: done.
 - Depends on: B1.
 - Work: RMSNorm, SiLU, softmax with the maximum subtracted, and the embedding row lookup. RMSNorm accumulates the mean of squares in f32, multiplies by `rsqrt(mean + eps)`, casts back, then multiplies by the weight. That is the order of `LlamaRMSNorm` (`research/transformers_formulas.md`, lines 52 to 69).
 - Done when: (a) exact small cases pass: softmax of two equal logits gives 0.5 each, SiLU of 0 is 0, and RMSNorm of a constant vector is exact; (b) random inputs with fixed seeds satisfy the D53 bounds against an f64 reference.
 
-**B3. RoPE, type `default`** (`packages/kernels`). Status: not started.
+**B3. RoPE, type `default`** (`packages/kernels`). Status: done.
 - Depends on: B0.
 - Work: rotate-half layout. Inverse frequencies `base^(−2i/d)` for `i` in `0 .. d/2 − 1`, computed in f32 in the order of `LlamaRotaryEmbedding` (`research/transformers_formulas.md`, lines 72 to 116). Positions are multiplied by the inverse frequencies in f32. The reference is the helper's f32 output, not an f64 port: an f64 computation of the same angles differs from that f32 result by more than the bound at large positions.
 - Done when: cos and sin match the helper within the D53 bound for positions 0 to 4095, head dimensions 64 and 128, and bases 10,000 and 500,000.
 
-**B4. RoPE, type `llama3`** (`packages/kernels`). Status: not started.
+**B4. RoPE, type `llama3`** (`packages/kernels`). Status: done.
 - Depends on: B3.
 - Work: port `_compute_llama3_parameters` (`research/transformers_formulas.md`, lines 5 to 92, from `modeling_rope_utils.py` lines 580 to 662) in f32, in the same operation order.
 - Done when: inverse frequencies match the helper within the D53 bound at every index, for the Llama 3.2-1B parameters (`factor` 32, `low_freq_factor` 1, `high_freq_factor` 4, `original_max_position_embeddings` 8192, `rope_theta` 500000).
 
-**B5. Attention** (`packages/kernels` and the decoder). Status: not started.
+**B5. Attention** (`packages/kernels` and the decoder). Status: done.
 - Depends on: B2, B3.
 - Work: query heads have width `n_heads · head_dim`; key and value heads have width `n_kv_heads · head_dim`. Query head `h` reads KV head `h / (n_heads / n_kv_heads)`. Optional q, k and v biases. Optional QK-norm: an RMSNorm over `head_dim` on each head's q and k, before RoPE (Qwen3). The output projection maps `n_heads · head_dim` back to the hidden size.
 - Done when: one attention layer of a tiny model with grouped-query heads, biases and QK-norm matches the helper's output within the D53 bound.
 
-**B6. Causal and sliding-window masks.** Status: not started.
+**B6. Causal and sliding-window masks.** Status: done.
 - Depends on: B5.
 - Work: causal mask for every family. Sliding-window mask for Mistral v0.1, with the rule `q − W < kv ≤ q` (decision D38), where `W` comes from `sliding_window` in the config (4096 in the real config).
 - Done when: the masks equal the helper's masks for a sequence longer than a small test window.
 
-**B7. Block, model and head.** Status: not started.
+**B7. Block, model and head.** Status: done.
 - Depends on: B6.
 - Work: pre-norm block: `h = x + attn(input_layernorm(x))`, then `out = h + mlp(post_attention_layernorm(h))`. Final norm. SwiGLU MLP: `down(silu(gate(x)) · up(x))`, with width `intermediate_size`. The head is tied to `embed_tokens` when `tie_word_embeddings` is true, and otherwise it is `lm_head`.
 - Done when: a tiny model runs forward and returns logits of shape `[T, vocab_size]`.
 
-**B8. Weight loading.** Status: not started.
+**B8. Weight loading.** Status: done.
 - Depends on: B7, B0a, phase 1.
 - Work: validate the manifest before any weight is read, then read each tensor into an f32 buffer, one tensor at a time. BF16, F16 and F32 are accepted, and BF16 is widened with `packages/bf16`. Memory mapping is not needed in M0, which accepts checkpoints of up to 1.3 billion parameters (D6).
 - Done when: a fixture whose manifest check fails is rejected before any tensor is read, and a tiny model written by the helper loads with every tensor equal, bit for bit, to the helper's values.
 
-**B9. Gate tests.** Status: not started.
+**B9. Gate tests.** Status: done.
 - Depends on: B0, B8.
 - Work: one tiny random model per case, compared with the helper's logits within the D53 bound: Llama with default RoPE; Llama with `llama3` RoPE; Qwen2 with QKV bias; Qwen3 with QK-norm, explicit `head_dim` and a tied head; Mistral with a sliding window and an untied head.
 - Done when: every case passes. The largest difference is recorded in PROJECT.md after the run, and the bound does not change.
@@ -127,24 +127,24 @@ Gate: logits match transformers v5.20.2 on tiny random models, one per family in
 
 Gate: logits match transformers v5.20.2 on the same token ids, within the D53 bound. The tests read checkpoints from the directory named by the environment variable `NCMORPH_CHECKPOINT_DIR` (D12), and they skip when it is unset. Checkpoints are never committed. If a real checkpoint exceeds the bound, record the measured difference and stop. Do not change the bound.
 
-**C1. Token-id path (T0).** Status: not started.
+**C1. Token-id path (T0).** Status: done.
 - Depends on: phase 2.
 - Work: the helper runs a checkpoint on a fixed id list and writes the reference logits to a file that is not committed. The Zig test reads the ids and the logits and compares. The test never tokenizes text. Tokenization is phase 7.
 - Done when: the helper and the test run on SmolLM2-135M, and the reference output is not committed.
 
-**C2. SmolLM2-135M.** Status: not started. Depends on: C1. Llama architecture, single file, tied head, RoPE base 100000. Done when: logits match within the bound, and the largest difference is recorded.
+**C2. SmolLM2-135M.** Status: done. Depends on: C1. Llama architecture, single file, tied head, RoPE base 100000. After matching the pinned oneDNN K-block reduction, the eager/BF16 gate passed with max logit difference `0.0` and maximum row tolerance `0.002725` (section 30 of `research/checks.md`). Done when: logits match within the bound, and the largest difference is recorded.
 
-**C3. Qwen2.5-0.5B.** Status: not started. Depends on: C1. QKV bias, tied head. Done when: as C2.
+**C3. Qwen2.5-0.5B.** Status: done. Depends on: C1. QKV bias, tied head. After applying the source-verified pinned CPU RMSNorm sum cascade, the regenerated eager/BF16 gate passed with maximum logit difference `0.0` and maximum row tolerance `0.0016375` (section 31 of `research/checks.md`). The earlier pre-fix failures and stale-reference result remain documented. Done when: as C2.
 
-**C4. Qwen3-0.6B.** Status: not started. Depends on: C1. QK-norm, explicit `head_dim` 128, and `lm_head.weight` stored next to a tied `embed_tokens`. Done when: as C2, and the load checks that `lm_head.weight` equals `model.embed_tokens.weight` after widening. The byte identity is already recorded in [research/checks.md](research/checks.md), section 3.
+**C4. Qwen3-0.6B.** Status: done. Depends on: C1. QK-norm, explicit `head_dim` 128, and `lm_head.weight` stored next to a tied `embed_tokens`. The helper's Qwen3 context diagnostic now includes QK-norm; the eager/BF16 gate passed with maximum logit difference `0.0` and maximum row tolerance `0.001575` (section 32 of `research/checks.md`). The load checks `lm_head.weight` equals `model.embed_tokens.weight` after widening. The byte identity is recorded in [research/checks.md](research/checks.md), section 3. Done when: as C2.
 
-**C5. Llama 3.2-1B.** Status: not started. Depends on: C1. `llama3` RoPE on real weights. The model has about 1.24 billion parameters, so it is the largest checkpoint M0 accepts (D6). Done when: as C2.
+**C5. Llama 3.2-1B.** Status: done. Depends on: C1. `llama3` RoPE on real weights. The copied, hash-verified checkpoint passed the eager/BF16 gate with maximum logit difference `0.0` and maximum row tolerance `0.00185` (section 33 of `research/checks.md`). The model has about 1.24 billion parameters, so it is the largest checkpoint M0 accepts (D6). Done when: as C2.
 
 ## Phase 4: Z1 Zig upgrade
 
-**Z1. Move to the current stable Zig.** Status: not started. Depends on: C5.
+**Z1. Move to the current stable Zig.** Status: done. Depends on: C5.
 - Work: decision D28 moves the project to the then-current stable Zig release. On 2026-10-26 that is 0.17.0. Read its release notes first. Set the new version in `build.zig.zon` (`minimum_zig_version`) and in the toolchain section of AGENTS.md. Run `zig build test` and `zig fmt --check .` on the new version. Grep every standard-library name listed in D29 in the new standard library (`zig env` prints its `std_dir`), and fix any name that was renamed or removed.
-- Done when: all tests pass and the format check is clean on the new version, every name in D29 exists in its standard library, and the change is recorded in PROJECT.md's decision log.
+- Done when: all tests pass and the format check is clean on the new version, every name in D29 exists in its standard library, and the change is recorded in PROJECT.md's decision log. Completed with D69; `Build.args` and array multiplication syntax were migrated per the official release notes (evidence in `research/checks.md`, section 35).
 
 ## Phase 5: M1 NCM dialect
 

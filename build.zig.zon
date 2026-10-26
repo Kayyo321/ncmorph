@@ -5,7 +5,7 @@
     // Generated once by `zig init` for this package name. Keep it unchanged.
     .fingerprint = 0xf141ed3987fbf930,
     // The earliest Zig version this package supports.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     // Files that belong to the package, which the content hash covers.
     .paths = .{

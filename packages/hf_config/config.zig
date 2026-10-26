@@ -135,11 +135,24 @@ pub fn parse_config(arena: Allocator, json_bytes: []const u8) !report_t {
     };
 
     const rms_norm_eps = (try float_field(&collector, fields, "rms_norm_eps")) orelse 0;
-    const rope_theta = if (fields.contains("rope_theta"))
-        (try float_field(&collector, fields, "rope_theta")) orelse 0
+    const rope_parameters = try parse_rope_parameters(&collector, fields);
+    const top_rope_theta = if (fields.contains("rope_theta"))
+        try float_field(&collector, fields, "rope_theta")
+    else
+        null;
+    const rope_theta = top_rope_theta orelse if (rope_parameters) |parameters|
+        parameters.rope_theta orelse DefaultRopeTheta
     else
         DefaultRopeTheta;
-    const rope_scaling = try parse_rope_scaling(&collector, fields);
+    if (rope_parameters) |parameters| {
+        if (parameters.rope_theta) |parameter_theta| {
+            const legacy_theta = top_rope_theta orelse DefaultRopeTheta;
+            if ((top_rope_theta != null or fields.contains("rope_scaling")) and legacy_theta != parameter_theta) {
+                try collector.add("rope_parameters", "rope_theta disagrees with legacy RoPE settings", .{});
+            }
+        }
+    }
+    const rope_scaling = try parse_rope_scaling(&collector, fields, rope_parameters);
 
     const hidden_act = (try optional_string_field(&collector, fields, "hidden_act")) orelse "silu";
     if (!std.mem.eql(u8, hidden_act, "silu")) {
@@ -151,11 +164,7 @@ pub fn parse_config(arena: Allocator, json_bytes: []const u8) !report_t {
     if (try bool_field(&collector, fields, "rope_interleaved", false)) {
         try collector.add("rope_interleaved", "only the rotate-half RoPE layout is supported", .{});
     }
-    if (fields.get("partial_rotary_factor")) |value| switch (value) {
-        .float => |factor| if (factor != 1.0) try collector.add("partial_rotary_factor", "only full rotary embeddings are supported", .{}),
-        .integer => |factor| if (factor != 1) try collector.add("partial_rotary_factor", "only full rotary embeddings are supported", .{}),
-        else => try collector.add("partial_rotary_factor", "must be a number", .{}),
-    };
+    try check_partial_rotary_factor(&collector, fields, "partial_rotary_factor", "partial_rotary_factor");
     for ([_][]const u8{ "num_local_experts", "num_experts", "num_experts_per_tok" }) |key| {
         if (fields.get(key)) |value| switch (value) {
             .null => {},
@@ -311,64 +320,136 @@ fn bool_field(collector: *collector_t, fields: ObjectMap, key: []const u8, defau
     };
 }
 
-fn parse_rope_scaling(collector: *collector_t, fields: ObjectMap) !rope_scaling_t {
-    if (fields.contains("rope_parameters")) {
-        try collector.add("rope_parameters", "only rope_scaling is read in this version", .{});
+const rope_parameters_t = struct {
+    rope_theta: ?f64,
+    rope_scaling: rope_scaling_t,
+};
+
+fn parse_rope_parameters(collector: *collector_t, fields: ObjectMap) !?rope_parameters_t {
+    const value = fields.get("rope_parameters") orelse return null;
+    const parameters = switch (value) {
+        .object => |object| object,
+        else => {
+            try collector.add("rope_parameters", "must be an object", .{});
+            return null;
+        },
+    };
+    for (parameters.values()) |parameter_value| switch (parameter_value) {
+        .object => {
+            try collector.add("rope_parameters", "nested per-layer RoPE parameters are not supported", .{});
+            break;
+        },
+        else => {},
+    };
+    try check_partial_rotary_factor(collector, parameters, "partial_rotary_factor", "rope_parameters.partial_rotary_factor");
+    const rope_theta = if (parameters.contains("rope_theta"))
+        (try scaling_float(collector, parameters, "rope_theta", "rope_parameters", "rope_theta"))
+    else
+        null;
+    const rope_scaling = try parse_scaling_object(collector, parameters, "rope_parameters");
+    return .{ .rope_theta = rope_theta, .rope_scaling = rope_scaling };
+}
+
+fn check_partial_rotary_factor(collector: *collector_t, fields: ObjectMap, key: []const u8, feature: []const u8) !void {
+    if (fields.get(key)) |value| switch (value) {
+        .float => |factor| if (factor != 1.0) try collector.add(feature, "only full rotary embeddings are supported", .{}),
+        .integer => |factor| if (factor != 1) try collector.add(feature, "only full rotary embeddings are supported", .{}),
+        else => try collector.add(feature, "must be a number", .{}),
+    };
+}
+
+fn parse_rope_scaling(collector: *collector_t, fields: ObjectMap, parameters: ?rope_parameters_t) !rope_scaling_t {
+    const value = fields.get("rope_scaling") orelse return if (parameters) |rope| rope.rope_scaling else .Default;
+    const legacy_scaling = try parse_scaling_value(collector, value, "rope_scaling");
+    if (parameters) |rope| {
+        if (!rope_scaling_equal(legacy_scaling, rope.rope_scaling)) {
+            try collector.add("rope_parameters", "RoPE settings disagree with rope_scaling", .{});
+        }
     }
-    const value = fields.get("rope_scaling") orelse return .Default;
+    return legacy_scaling;
+}
+
+fn parse_scaling_object(collector: *collector_t, scaling: ObjectMap, feature: []const u8) !rope_scaling_t {
+    return try parse_scaling_map(collector, scaling, feature);
+}
+
+fn parse_scaling_value(collector: *collector_t, value: std.json.Value, feature: []const u8) !rope_scaling_t {
     const scaling = switch (value) {
         .null => return .Default,
         .object => |object| object,
         else => {
-            try collector.add("rope_scaling", "must be an object or null", .{});
+            try collector.add(feature, "must be an object or null", .{});
             return .Default;
         },
     };
+    return try parse_scaling_map(collector, scaling, feature);
+}
+
+fn parse_scaling_map(collector: *collector_t, scaling: ObjectMap, feature: []const u8) !rope_scaling_t {
     const rope_type_value = scaling.get("rope_type") orelse scaling.get("type") orelse return .Default;
     const rope_type = switch (rope_type_value) {
         .string => |text| text,
         else => {
-            try collector.add("rope_scaling", "rope type must be a string", .{});
+            try collector.add(feature, "rope type must be a string", .{});
             return .Default;
         },
     };
     if (std.mem.eql(u8, rope_type, "default")) return .Default;
     if (!std.mem.eql(u8, rope_type, "llama3")) {
-        try collector.add("rope_scaling", "rope type '{s}' is not supported in this version", .{rope_type});
+        try collector.add(feature, "rope type '{s}' is not supported in this version", .{rope_type});
         return .Default;
     }
     return .{ .Llama3 = .{
-        .factor = try scaling_float(collector, scaling, "factor"),
-        .low_freq_factor = try scaling_float(collector, scaling, "low_freq_factor"),
-        .high_freq_factor = try scaling_float(collector, scaling, "high_freq_factor"),
-        .original_max_position_embeddings = try scaling_uint(collector, scaling, "original_max_position_embeddings"),
+        .factor = try scaling_float(collector, scaling, "factor", feature, "factor"),
+        .low_freq_factor = try scaling_float(collector, scaling, "low_freq_factor", feature, "low_freq_factor"),
+        .high_freq_factor = try scaling_float(collector, scaling, "high_freq_factor", feature, "high_freq_factor"),
+        .original_max_position_embeddings = try scaling_uint(collector, scaling, "original_max_position_embeddings", feature, "original_max_position_embeddings"),
     } };
 }
 
-fn scaling_float(collector: *collector_t, scaling: ObjectMap, comptime key: []const u8) !f64 {
+fn rope_scaling_equal(left: rope_scaling_t, right: rope_scaling_t) bool {
+    return switch (left) {
+        .Default => right == .Default,
+        .Llama3 => |left_values| switch (right) {
+            .Default => false,
+            .Llama3 => |right_values| left_values.factor == right_values.factor and
+                left_values.low_freq_factor == right_values.low_freq_factor and
+                left_values.high_freq_factor == right_values.high_freq_factor and
+                left_values.original_max_position_embeddings == right_values.original_max_position_embeddings,
+        },
+    };
+}
+
+fn scaling_path(collector: *collector_t, feature: []const u8, key: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(collector.arena, "{s}.{s}", .{ feature, key });
+}
+
+fn scaling_float(collector: *collector_t, scaling: ObjectMap, key: []const u8, feature: []const u8, path_key: []const u8) !f64 {
+    const path = try scaling_path(collector, feature, path_key);
     const value = scaling.get(key) orelse {
-        try collector.add("rope_scaling." ++ key, "required key is missing", .{});
+        try collector.add(path, "required key is missing", .{});
         return 0;
     };
     return switch (value) {
         .float => |number| number,
         .integer => |number| @as(f64, @floatFromInt(number)),
         else => {
-            try collector.add("rope_scaling." ++ key, "must be a number", .{});
+            try collector.add(path, "must be a number", .{});
             return 0;
         },
     };
 }
 
-fn scaling_uint(collector: *collector_t, scaling: ObjectMap, comptime key: []const u8) !u64 {
+fn scaling_uint(collector: *collector_t, scaling: ObjectMap, key: []const u8, feature: []const u8, path_key: []const u8) !u64 {
+    const path = try scaling_path(collector, feature, path_key);
     const value = scaling.get(key) orelse {
-        try collector.add("rope_scaling." ++ key, "required key is missing", .{});
+        try collector.add(path, "required key is missing", .{});
         return 0;
     };
     return switch (value) {
         .integer => |number| if (number >= 0) @as(u64, @intCast(number)) else 0,
         else => {
-            try collector.add("rope_scaling." ++ key, "must be a non-negative integer", .{});
+            try collector.add(path, "must be a non-negative integer", .{});
             return 0;
         },
     };
@@ -556,6 +637,80 @@ test "reads llama3 RoPE scaling" {
     const scaling = report.spec.?.rope_scaling.Llama3;
     try std.testing.expectEqual(@as(f64, 32.0), scaling.factor);
     try std.testing.expectEqual(@as(u64, 8192), scaling.original_max_position_embeddings);
+}
+
+test "rope_parameters gives the same spec as the legacy RoPE fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const legacy_json =
+        \\{"architectures":["LlamaForCausalLM"],"model_type":"llama","vocab_size":8,
+        \\ "hidden_size":4,"intermediate_size":8,"num_hidden_layers":1,
+        \\ "num_attention_heads":2,"num_key_value_heads":1,"rms_norm_eps":1e-05,
+        \\ "rope_theta":500000.0,"rope_scaling":{"factor":32.0,"high_freq_factor":4.0,
+        \\ "low_freq_factor":1.0,"original_max_position_embeddings":8192,"rope_type":"llama3"}}
+    ;
+    const parameters_json =
+        \\{"architectures":["LlamaForCausalLM"],"model_type":"llama","vocab_size":8,
+        \\ "hidden_size":4,"intermediate_size":8,"num_hidden_layers":1,
+        \\ "num_attention_heads":2,"num_key_value_heads":1,"rms_norm_eps":1e-05,
+        \\ "rope_parameters":{"rope_theta":500000.0,"rope_type":"llama3","factor":32.0,
+        \\ "high_freq_factor":4.0,"low_freq_factor":1.0,"original_max_position_embeddings":8192}}
+    ;
+    const legacy = try parse_config(arena.allocator(), legacy_json);
+    const parameters = try parse_config(arena.allocator(), parameters_json);
+    try std.testing.expectEqual(@as(usize, 0), legacy.problems.len);
+    try std.testing.expectEqual(@as(usize, 0), parameters.problems.len);
+    try std.testing.expectEqual(legacy.spec.?, parameters.spec.?);
+}
+
+test "reports when rope_parameters and legacy rope_scaling disagree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"architectures":["LlamaForCausalLM"],"model_type":"llama","vocab_size":8,
+        \\ "hidden_size":4,"intermediate_size":8,"num_hidden_layers":1,
+        \\ "num_attention_heads":2,"num_key_value_heads":1,"rms_norm_eps":1e-05,
+        \\ "rope_theta":500000.0,"rope_scaling":{"factor":32.0,"high_freq_factor":4.0,
+        \\ "low_freq_factor":1.0,"original_max_position_embeddings":8192,"rope_type":"llama3"},
+        \\ "rope_parameters":{"rope_theta":500000.0,"rope_type":"llama3","factor":64.0,
+        \\ "high_freq_factor":4.0,"low_freq_factor":1.0,"original_max_position_embeddings":8192}}
+    ;
+    const report = try parse_config(arena.allocator(), json);
+    try std.testing.expect(report.spec == null);
+    try std.testing.expectEqual(@as(usize, 1), report.problems.len);
+    try std.testing.expectEqualStrings("rope_parameters", report.problems[0].feature);
+}
+
+test "rejects partial rotary factor inside rope_parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"architectures":["LlamaForCausalLM"],"model_type":"llama","vocab_size":8,
+        \\ "hidden_size":4,"intermediate_size":8,"num_hidden_layers":1,
+        \\ "num_attention_heads":2,"num_key_value_heads":1,"rms_norm_eps":1e-05,
+        \\ "rope_parameters":{"rope_theta":10000.0,"rope_type":"default","partial_rotary_factor":0.5}}
+    ;
+    const report = try parse_config(arena.allocator(), json);
+    try std.testing.expect(report.spec == null);
+    try std.testing.expectEqual(@as(usize, 1), report.problems.len);
+    try std.testing.expectEqualStrings("rope_parameters.partial_rotary_factor", report.problems[0].feature);
+}
+
+test "rejects nested per-layer rope_parameters instead of defaulting RoPE" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"architectures":["Qwen3ForCausalLM"],"model_type":"qwen3","vocab_size":8,
+        \\ "hidden_size":4,"intermediate_size":8,"num_hidden_layers":1,
+        \\ "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"rms_norm_eps":1e-06,
+        \\ "layer_types":["full_attention"],"rope_parameters":{"full_attention":{"rope_theta":500000.0,
+        \\ "rope_type":"llama3","factor":32.0,"low_freq_factor":1.0,"high_freq_factor":4.0,
+        \\ "original_max_position_embeddings":8192}}}
+    ;
+    const report = try parse_config(arena.allocator(), json);
+    try std.testing.expect(report.spec == null);
+    try std.testing.expectEqual(@as(usize, 1), report.problems.len);
+    try std.testing.expectEqualStrings("rope_parameters", report.problems[0].feature);
 }
 
 test "rejects multimodal RoPE, interleaved RoPE and mixture-of-experts" {
