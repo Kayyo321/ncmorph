@@ -72,6 +72,10 @@ const FamilyRows = [_]family_row_t{
 /// Head width of Qwen3 when `head_dim` is absent: the config class default, not hidden / heads.
 const Qwen3DefaultHeadDim: u64 = 128;
 
+/// RoPE base when config.json has no rope_theta. transformers v5.20.2 applies
+/// RotaryEmbeddingConfigMixin.default_theta (modeling_rope_utils.py) to every family here.
+const DefaultRopeTheta: f64 = 10000.0;
+
 fn find_family(model_type: []const u8) ?family_row_t {
     for (FamilyRows) |row| {
         if (std.mem.eql(u8, row.model_type, model_type)) return row;
@@ -131,7 +135,10 @@ pub fn parse_config(arena: Allocator, json_bytes: []const u8) !report_t {
     };
 
     const rms_norm_eps = (try float_field(&collector, fields, "rms_norm_eps")) orelse 0;
-    const rope_theta = (try float_field(&collector, fields, "rope_theta")) orelse 0;
+    const rope_theta = if (fields.contains("rope_theta"))
+        (try float_field(&collector, fields, "rope_theta")) orelse 0
+    else
+        DefaultRopeTheta;
     const rope_scaling = try parse_rope_scaling(&collector, fields);
 
     const hidden_act = (try optional_string_field(&collector, fields, "hidden_act")) orelse "silu";
@@ -453,6 +460,20 @@ test "Qwen3 uses the explicit head_dim and QK-norm" {
     try std.testing.expectEqual(@as(u64, 128), spec.head_dim);
     try std.testing.expect(spec.qk_norm);
     try std.testing.expect(!spec.qkv_bias);
+}
+
+test "rope_theta defaults to 10000 when the key is absent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"architectures":["LlamaForCausalLM"],"model_type":"llama","vocab_size":32000,
+        \\ "hidden_size":4096,"intermediate_size":11008,"num_hidden_layers":32,
+        \\ "num_attention_heads":32,"rms_norm_eps":1e-05,"hidden_act":"silu",
+        \\ "tie_word_embeddings":false}
+    ;
+    const report = try parse_config(arena.allocator(), json);
+    try std.testing.expectEqual(@as(usize, 0), report.problems.len);
+    try std.testing.expectEqual(@as(f64, 10000.0), report.spec.?.rope_theta);
 }
 
 test "Mistral v0.1 keeps its 4096 sliding window" {

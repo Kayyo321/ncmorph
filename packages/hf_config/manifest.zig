@@ -44,6 +44,10 @@ const group_t = struct {
     detail: []const u8,
 };
 
+/// Per-layer buffer that older exports stored. transformers v5.20.2 `_adjust_missing_and_unexpected_keys`
+/// (modeling_utils.py) drops it on load, because the frequencies are computed from rope_theta.
+const InvFreqPattern = "self_attn.rotary_emb.inv_freq";
+
 /// Lists the tensors that `spec` requires. Optional tensors are marked, not omitted.
 pub fn templates(arena: Allocator, spec: config.spec_t) ![]template_t {
     var list: std.ArrayList(template_t) = .empty;
@@ -82,6 +86,7 @@ pub fn templates(arena: Allocator, spec: config.spec_t) ![]template_t {
         try add_template(arena, &list, "mlp.up_proj.bias", true, &.{width}, false);
         try add_template(arena, &list, "mlp.down_proj.bias", true, &.{hidden}, false);
     }
+    try add_template(arena, &list, InvFreqPattern, true, &.{spec.head_dim / 2}, true);
     return list.items;
 }
 
@@ -209,7 +214,7 @@ pub fn check(arena: Allocator, spec: config.spec_t, present: []const safetensors
             if (std.mem.eql(u8, tensor.name, "lm_head.weight") and spec.tie_word_embeddings) {
                 try notes.append(arena, .{
                     .feature = "lm_head.weight",
-                    .message = "present although the embeddings are tied; its values are compared when the weights are read",
+                    .message = "present although the embeddings are tied; inspect reads no weight values, so the two are not compared yet",
                 });
             }
         }
@@ -241,6 +246,14 @@ pub fn check(arena: Allocator, spec: config.spec_t, present: []const safetensors
         } else if (counts[0] == 0 and !template.optional) {
             try add_group(arena, &groups, .Missing, template.feature, template.pattern, "");
         }
+    }
+    for (list, seen) |template, counts| {
+        if (!std.mem.eql(u8, template.pattern, InvFreqPattern)) continue;
+        var found: u64 = 0;
+        for (counts) |count| found += count;
+        if (found == 0) continue;
+        const message = try std.fmt.allocPrint(arena, "{d} tensor(s) present but not loaded: transformers v5.20.2 drops these buffers and computes the frequencies from rope_theta", .{found});
+        try notes.append(arena, .{ .feature = template.feature, .message = message });
     }
 
     var problems: std.ArrayList(config.problem_t) = .empty;

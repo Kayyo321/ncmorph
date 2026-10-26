@@ -1,0 +1,7 @@
+{
+  "repo": "Qwen/Qwen3-32B",
+  "config_repo": "Qwen/Qwen3-32B",
+  "revision": "9216db5781bf21249d130ec9da846c4624c16137",
+  "fetched_on": "2026-10-26",
+  "contents": "config.json, safetensors header bytes (prefix included), index when sharded, sizes.json"
+}
