@@ -5,12 +5,13 @@ ncmorph is a bridge that turns an open-weight transformer language model into a 
 NCM generates text coarse to fine. A multiscale residual vector-quantized tokenizer represents a sequence as a hierarchy of discrete codes, and a transformer predicts that hierarchy level by level, generating all positions within a level in parallel. ncmorph carries an existing open-weight model into that form.
 
 - [PROJECT.md](PROJECT.md) describes the scope, architecture and design decisions.
+- [ROADMAP.md](ROADMAP.md) lists the implementation steps in the order they are done.
 - [AGENTS.md](AGENTS.md) holds the rules for AI coding agents working in this repository.
 - [LICENSE](LICENSE) is the Apache License 2.0.
 
 ## Requirements
 
-- The Zig version pinned in `build.zig.zon`. Install that exact version, not the newest release.
+- The Zig version named by `minimum_zig_version` in `build.zig.zon`. Use that version, because the code is checked against it.
 - Open-weight models in Hugging Face `safetensors` format. Model weights are not part of this repository and must never be committed.
 
 ## Build and test

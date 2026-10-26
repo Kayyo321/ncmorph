@@ -5,8 +5,9 @@ Instructions for AI coding agents working in this repository. Read this file and
 ## Read first
 
 1. [README.md](README.md): what ncmorph is and how to build it.
-2. [PROJECT.md](PROJECT.md): scope, architecture, decisions and open questions. It is the source of truth for what this project is.
-3. This file.
+2. [PROJECT.md](PROJECT.md): scope, pinned facts, architecture and decisions. It is the source of truth for what this project is, and it contains no open questions.
+3. [ROADMAP.md](ROADMAP.md): the implementation steps in order, and which are done. Start with the first step that is not done, and do not start a step before the steps it depends on are done. The research behind PROJECT.md is indexed in [research/README.md](research/README.md).
+4. This file.
 
 If a task conflicts with PROJECT.md, stop and ask. Do not change the scope on your own.
 
@@ -28,7 +29,7 @@ Before you state a fact (a Zig API, a file-format field, an NCM behavior, a hype
 
 Do not rely on memory for Zig standard-library signatures, file byte layouts, tensor names or NCM hyperparameters.
 
-If you cannot verify something, write `UNVERIFIED:` next to it in the code or in your report, and add it to "Open questions" in PROJECT.md. Do not fill the gap with a plausible guess.
+If you cannot verify something, research it until it is verified, and cite the source. If a choice must be made, make it, record the decision and its basis in PROJECT.md's decision log before the code that depends on it, and say so in your report. Do not leave a question open in PROJECT.md, and do not fill a gap with a plausible guess.
 
 ## Toolchain
 
@@ -112,4 +113,4 @@ Never say that tests pass unless you ran them in this task. Quote the command an
 
 ## Report format
 
-End every task with: changed files, the commands you ran with their results, what is unverified, and any new open questions.
+End every task with: changed files, the commands you ran with their results, anything you could not verify and why, and each decision you made with its basis.
