@@ -1,0 +1,7 @@
+{
+  "repo": "HuggingFaceTB/SmolLM2-135M",
+  "config_repo": "HuggingFaceTB/SmolLM2-135M",
+  "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+  "fetched_on": "2026-10-26",
+  "contents": "config.json, safetensors header bytes (prefix included), index when sharded, sizes.json"
+}

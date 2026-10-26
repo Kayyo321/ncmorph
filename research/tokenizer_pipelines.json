@@ -1,0 +1,644 @@
+{
+  "qwen2.5-0.5b": {
+    "source": "Qwen/Qwen2.5-0.5B @ 060db6499f32 (full file, blob 443909a61d42 at main)",
+    "normalizer": {
+      "type": "NFC"
+    },
+    "pre_tokenizer": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": false,
+          "use_regex": false
+        }
+      ]
+    },
+    "post_processor": {
+      "type": "ByteLevel",
+      "add_prefix_space": false,
+      "trim_offsets": false,
+      "use_regex": false
+    },
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": false,
+      "trim_offsets": false,
+      "use_regex": false
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": "",
+      "end_of_word_suffix": "",
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": "absent"
+    }
+  },
+  "qwen3-0.6b": {
+    "source": "Qwen/Qwen3-0.6B @ c1899de289a0 (first 32 KiB)",
+    "normalizer": {
+      "type": "NFC"
+    },
+    "pre_tokenizer": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": false,
+          "use_regex": false
+        }
+      ]
+    },
+    "post_processor": {
+      "type": "ByteLevel",
+      "add_prefix_space": false,
+      "trim_offsets": false,
+      "use_regex": false
+    },
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": false,
+      "trim_offsets": false,
+      "use_regex": false
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": "",
+      "end_of_word_suffix": "",
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": false
+    }
+  },
+  "smollm2-135m": {
+    "source": "HuggingFaceTB/SmolLM2-135M @ 93efa2f097d5 (first 32 KiB)",
+    "normalizer": null,
+    "pre_tokenizer": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Digits",
+          "individual_digits": true
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": true
+        }
+      ]
+    },
+    "post_processor": null,
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": true,
+      "trim_offsets": true,
+      "use_regex": true
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": false
+    }
+  },
+  "llama-2-7b": {
+    "source": "NousResearch/Llama-2-7b-hf @ 8efe6c9b9365 (first 32 KiB)",
+    "normalizer": {
+      "type": "Sequence",
+      "normalizers": [
+        {
+          "type": "Prepend",
+          "prepend": "▁"
+        },
+        {
+          "type": "Replace",
+          "pattern": {
+            "String": " "
+          },
+          "content": "▁"
+        }
+      ]
+    },
+    "pre_tokenizer": null,
+    "post_processor": {
+      "type": "TemplateProcessing",
+      "single": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        }
+      ],
+      "pair": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        },
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 1
+          }
+        },
+        {
+          "Sequence": {
+            "id": "B",
+            "type_id": 1
+          }
+        }
+      ],
+      "special_tokens": {
+        "<s>": {
+          "id": "<s>",
+          "ids": [
+            1
+          ],
+          "tokens": [
+            "<s>"
+          ]
+        }
+      }
+    },
+    "decoder": {
+      "type": "Sequence",
+      "decoders": [
+        {
+          "type": "Replace",
+          "pattern": {
+            "String": "▁"
+          },
+          "content": " "
+        },
+        {
+          "type": "ByteFallback"
+        },
+        {
+          "type": "Fuse"
+        },
+        {
+          "type": "Strip",
+          "content": " ",
+          "start": 1,
+          "stop": 0
+        }
+      ]
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": "<unk>",
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": true,
+      "byte_fallback": true,
+      "ignore_merges": "absent"
+    }
+  },
+  "mistral-7b-v0.1": {
+    "source": "mistralai/Mistral-7B-v0.1 @ 27d67f1b5f57 (first 32 KiB)",
+    "normalizer": null,
+    "pre_tokenizer": {
+      "type": "Metaspace",
+      "replacement": "▁",
+      "prepend_scheme": "first",
+      "split": false
+    },
+    "post_processor": {
+      "type": "TemplateProcessing",
+      "single": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        }
+      ],
+      "pair": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        },
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 1
+          }
+        },
+        {
+          "Sequence": {
+            "id": "B",
+            "type_id": 1
+          }
+        }
+      ],
+      "special_tokens": {
+        "<s>": {
+          "id": "<s>",
+          "ids": [
+            1
+          ],
+          "tokens": [
+            "<s>"
+          ]
+        }
+      }
+    },
+    "decoder": {
+      "type": "Sequence",
+      "decoders": [
+        {
+          "type": "Replace",
+          "pattern": {
+            "String": "▁"
+          },
+          "content": " "
+        },
+        {
+          "type": "ByteFallback"
+        },
+        {
+          "type": "Fuse"
+        },
+        {
+          "type": "Strip",
+          "content": " ",
+          "start": 1,
+          "stop": 0
+        }
+      ]
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": "<unk>",
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": true,
+      "byte_fallback": true,
+      "ignore_merges": false
+    }
+  },
+  "llama-3.0-8b": {
+    "source": "NousResearch/Meta-Llama-3-8B @ 315b20096dc7 (bytes 40000-100000)",
+    "normalizer": null,
+    "pre_tokenizer": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        }
+      ]
+    },
+    "post_processor": {
+      "type": "Sequence",
+      "processors": [
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": true,
+          "trim_offsets": false,
+          "use_regex": true
+        },
+        {
+          "type": "TemplateProcessing",
+          "single": [
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 0
+              }
+            },
+            {
+              "Sequence": {
+                "id": "A",
+                "type_id": 0
+              }
+            }
+          ],
+          "pair": [
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 0
+              }
+            },
+            {
+              "Sequence": {
+                "id": "A",
+                "type_id": 0
+              }
+            },
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 1
+              }
+            },
+            {
+              "Sequence": {
+                "id": "B",
+                "type_id": 1
+              }
+            }
+          ],
+          "special_tokens": {
+            "<|begin_of_text|>": {
+              "id": "<|begin_of_text|>",
+              "ids": [
+                128000
+              ],
+              "tokens": [
+                "<|begin_of_text|>"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": true,
+      "trim_offsets": true,
+      "use_regex": true
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": true
+    }
+  },
+  "llama-3.2-1b": {
+    "source": "unsloth/Llama-3.2-1B @ 9535bd9b1d1d (bytes 40000-100000)",
+    "normalizer": null,
+    "pre_tokenizer": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        }
+      ]
+    },
+    "post_processor": {
+      "type": "Sequence",
+      "processors": [
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": true,
+          "trim_offsets": false,
+          "use_regex": true
+        },
+        {
+          "type": "TemplateProcessing",
+          "single": [
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 0
+              }
+            },
+            {
+              "Sequence": {
+                "id": "A",
+                "type_id": 0
+              }
+            }
+          ],
+          "pair": [
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 0
+              }
+            },
+            {
+              "Sequence": {
+                "id": "A",
+                "type_id": 0
+              }
+            },
+            {
+              "SpecialToken": {
+                "id": "<|begin_of_text|>",
+                "type_id": 1
+              }
+            },
+            {
+              "Sequence": {
+                "id": "B",
+                "type_id": 1
+              }
+            }
+          ],
+          "special_tokens": {
+            "<|begin_of_text|>": {
+              "id": "<|begin_of_text|>",
+              "ids": [
+                128000
+              ],
+              "tokens": [
+                "<|begin_of_text|>"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": true,
+      "trim_offsets": true,
+      "use_regex": true
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": true
+    }
+  },
+  "mistral-7b-v0.3": {
+    "source": "mistralai/Mistral-7B-v0.3 @ caa1feb0e54d (bytes 120000-200000)",
+    "normalizer": null,
+    "pre_tokenizer": {
+      "type": "Metaspace",
+      "replacement": "▁",
+      "prepend_scheme": "first",
+      "split": false
+    },
+    "post_processor": {
+      "type": "TemplateProcessing",
+      "single": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        }
+      ],
+      "pair": [
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 0
+          }
+        },
+        {
+          "Sequence": {
+            "id": "A",
+            "type_id": 0
+          }
+        },
+        {
+          "SpecialToken": {
+            "id": "<s>",
+            "type_id": 1
+          }
+        },
+        {
+          "Sequence": {
+            "id": "B",
+            "type_id": 1
+          }
+        }
+      ],
+      "special_tokens": {
+        "<s>": {
+          "id": "<s>",
+          "ids": [
+            1
+          ],
+          "tokens": [
+            "<s>"
+          ]
+        }
+      }
+    },
+    "decoder": {
+      "type": "Sequence",
+      "decoders": [
+        {
+          "type": "Replace",
+          "pattern": {
+            "String": "▁"
+          },
+          "content": " "
+        },
+        {
+          "type": "ByteFallback"
+        },
+        {
+          "type": "Fuse"
+        },
+        {
+          "type": "Strip",
+          "content": " ",
+          "start": 1,
+          "stop": 0
+        }
+      ]
+    },
+    "model_flags": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": "<unk>",
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": true,
+      "byte_fallback": true,
+      "ignore_merges": false
+    }
+  }
+}

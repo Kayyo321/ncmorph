@@ -1,0 +1,7 @@
+{
+  "repo": "mistralai/Mistral-7B-v0.1",
+  "config_repo": "mistralai/Mistral-7B-v0.1",
+  "revision": "27d67f1b5f57dc0953326b2601d68371d40ea8da",
+  "fetched_on": "2026-10-26",
+  "contents": "config.json, safetensors header bytes (prefix included), index when sharded, sizes.json"
+}
