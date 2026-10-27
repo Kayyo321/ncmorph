@@ -27,7 +27,7 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 | 3 | M0c real checkpoints | Done |
 | 4 | Z1 Zig upgrade | Done after M0c |
 | 5 | M1 NCM dialect | Done |
-| 6 | M2 transplant | Next: step M2.1 |
+| 6 | M2 transplant | Done |
 | 7 | Tokenizers T0, T1, T2 | Not started |
 | 8 | Data, writer and VQ tokenizers | Not started. The Qwen3 route and the trained families are decided (D10, D14) |
 | 9 | M3 generator training | Not started |
@@ -176,30 +176,13 @@ Facts this phase relies on, all from the pinned reference (commit `c70274273f489
 
 Gate: every transplanted tensor is bit-identical to its source after widening. The report lists every NCM tensor as exact, initialized or new, with a checksum. It also lists every source tensor that has no counterpart as not used.
 
-**M2.1. Mapping table.** Status: not started. Depends on: N8. This table is the decision record for the transplant. Record it in PROJECT.md before the transplant code is written. It is the table below, after its entries are confirmed against the pinned names.
+**M2.1. Mapping table.** Status: done. Depends on: N8. The decision record is the "M2 transplant mapping" table in PROJECT.md (D74). It was checked against source checkpoint names and shapes, the pinned reference names and QKV split order, and the local destination manifest and executor. Exact means bit-identical after widening; the source and destination matrix shapes have the same `[output, input]` layout. This decision is recorded before M2.2 transplant code.
 
-| Source tensor | NCM tensor | Status |
-|---|---|---|
-| `model.layers.i.input_layernorm.weight` | `transformer.blocks.i.ln_1.weight` | exact |
-| `model.layers.i.self_attn.{q,k,v}_proj.weight` | rows of `transformer.blocks.i.attn.c_attn.weight`, in q, k, v order | exact |
-| `model.layers.i.self_attn.{q,k,v}_proj.bias` (when present) | rows of `transformer.blocks.i.attn.c_attn.bias` | exact |
-| `model.layers.i.self_attn.o_proj.weight` | `transformer.blocks.i.attn.c_proj.weight` | exact |
-| `model.layers.i.self_attn.o_proj.bias` (when present) | `transformer.blocks.i.attn.c_proj.bias` | exact |
-| `model.layers.i.self_attn.{q,k}_norm.weight` (Qwen3) | `transformer.blocks.i.attn.{q,k}_norm.weight` | exact |
-| `model.layers.i.post_attention_layernorm.weight` | `transformer.blocks.i.ln_2.weight` | exact |
-| `model.layers.i.mlp.gate_proj.weight` | `transformer.blocks.i.mlp.w_gate.weight` | exact |
-| `model.layers.i.mlp.up_proj.weight` | `transformer.blocks.i.mlp.w_up.weight` | exact |
-| `model.layers.i.mlp.down_proj.weight` | `transformer.blocks.i.mlp.c_proj.weight` | exact |
-| `model.norm.weight` | `transformer.ln_f.weight` | exact |
-| `model.embed_tokens.weight` | no counterpart. Its width is the source hidden size, and the VQ width is 384 (D3). The NCM prefix table is the VQ encoder's (D58) | not used |
-| `lm_head.weight` | no counterpart. The NCM heads are codebook-tied (D18) | not used |
-| `model.layers.i.self_attn.rotary_emb.inv_freq` | computed from `rope_theta` | not used |
+**M2.2. Transplant engine.** Status: done. Depends on: M2.1. Copy every exact tensor after widening. Initialize every other NCM tensor with the policy of D30, seeded and recorded in PROJECT.md. Done when: exact tensors are bit-identical to their source after widening, and rerunning with the same seed gives the same initialized tensors.
 
-**M2.2. Transplant engine.** Status: not started. Depends on: M2.1. Copy every exact tensor after widening. Initialize every other NCM tensor with the policy of D30, seeded and recorded in PROJECT.md. Done when: exact tensors are bit-identical to their source after widening, and rerunning with the same seed gives the same initialized tensors.
+**M2.3. Transplant report.** Status: done. Depends on: M2.2. One row per NCM tensor: NCM name, status, source name, shape, dtype, and the SHA-256 of the widened f32 bytes. The hash uses `std.crypto.hash.sha2.Sha256` (D29). Source tensors without a counterpart appear with status "not used". Done when: each NCM tensor and each source tensor appears exactly once, and recomputing the checksums from the loaded tensors matches the report.
 
-**M2.3. Transplant report.** Status: not started. Depends on: M2.2. One row per NCM tensor: NCM name, status, source name, shape, dtype, and the SHA-256 of the widened f32 bytes. The hash uses `std.crypto.sha2.Sha256` (D29). Source tensors without a counterpart appear with status "not used". Done when: each NCM tensor and each source tensor appears exactly once, and recomputing the checksums from the loaded tensors matches the report.
-
-**M2.4. Gate test.** Status: not started. Depends on: M2.3. Exact tensors are compared byte for byte. The number of exact tensors equals the number of source tensors that the mapping table maps to an NCM tensor.
+**M2.4. Gate test.** Status: done. Depends on: M2.3. Exact tensors are compared byte for byte. The number of mapped source identities equals the number of source tensors that the mapping table maps to an NCM tensor; each fused QKV target accounts for three source identities. The tests cover twelve synthetic layers and seven generated checkpoint cases, including BF16, comparing exact bytes, checking complete report coverage and recomputing report hashes. Run `NCMORPH_GOLDEN_PYTHON=<pinned-python> bash tools/check_m2.sh` to regenerate the fixtures and run this gate with a fresh build cache; the pinned Python environment is described in B0.
 
 ## Phase 7: Tokenizers T0, T1 and T2
 

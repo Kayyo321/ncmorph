@@ -346,6 +346,10 @@ def generate(output_dir: Path, seed: int) -> None:
             for parameter in bf16_model.parameters():
                 parameter.data = parameter.data.to(dtype=torch.bfloat16)
             bf16_model.config._attn_implementation = "eager"
+            if case_name == "llama_default":
+                bf16_dir = output_dir / "llama_default_bf16"
+                bf16_dir.mkdir(parents=True, exist_ok=True)
+                bf16_model.save_pretrained(bf16_dir, safe_serialization=True)
             bf16_outputs = bf16_model(
                 input_ids,
                 position_ids=position_ids,

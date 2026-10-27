@@ -96,6 +96,16 @@ pub fn build(b: *std.Build) void {
             .{ .name = "safetensors", .module = safetensors },
         },
     });
+    const ncm_transplant = b.addModule("ncm_transplant", .{
+        .root_source_file = b.path("src/ncm_transplant.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "loader", .module = loader },
+            .{ .name = "ncm_manifest", .module = ncm_manifest },
+            .{ .name = "hf_config", .module = hf_config },
+            .{ .name = "safetensors", .module = safetensors },
+        },
+    });
 
     const exe = b.addExecutable(.{
         .name = "ncmorph",
@@ -120,7 +130,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
-    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader };
+    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader, ncm_transplant };
     for (library_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);

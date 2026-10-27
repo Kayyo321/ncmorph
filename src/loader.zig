@@ -33,6 +33,7 @@ pub const loaded_model_t = struct {
     spec: hf_config.config.spec_t,
     weights: decoder.model_weights_t,
     tensors: []const loaded_tensor_t,
+    unused_tensors: []const safetensors.tensor_info_t,
 };
 
 pub const loaded_tensor_t = struct {
@@ -175,8 +176,12 @@ fn load_checkpoint_report_impl(
     var tensors: tensor_map_t = .empty;
     defer tensors.deinit(allocator);
     var loaded_tensors: std.ArrayList(loaded_tensor_t) = .empty;
+    var unused_tensors: std.ArrayList(safetensors.tensor_info_t) = .empty;
     for (locations.items) |location| {
-        if (std.mem.endsWith(u8, location.info.name, ".self_attn.rotary_emb.inv_freq")) continue;
+        if (is_unused_tensor(location.info.name)) {
+            try unused_tensors.append(allocator, location.info);
+            continue;
+        }
         const values = try read_tensor(
             allocator,
             io,
@@ -190,15 +195,82 @@ fn load_checkpoint_report_impl(
 
     var all_bf16 = true;
     for (locations.items) |location| {
-        if (std.mem.endsWith(u8, location.info.name, ".self_attn.rotary_emb.inv_freq")) continue;
+        if (is_unused_tensor(location.info.name)) continue;
         if (location.info.dtype != .Bf16) all_bf16 = false;
     }
     const model = loaded_model_t{
         .spec = spec,
         .weights = try build_weights(allocator, spec, &tensors, all_bf16),
         .tensors = loaded_tensors.items,
+        .unused_tensors = unused_tensors.items,
     };
     return .{ .loaded = model };
+}
+
+fn is_unused_tensor(name: []const u8) bool {
+    return std.mem.endsWith(u8, name, ".self_attn.rotary_emb.inv_freq");
+}
+
+test "optional rotary inverse frequencies are reported as unused tensors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source_path = "zig-out/golden/llama_default";
+    const source_config = try std.fmt.allocPrint(allocator, "{s}/config.json", .{source_path});
+    const config = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        source_config,
+        allocator,
+        .limited(1 << 20),
+    ) catch |err| return skip_without_golden(err, source_config);
+    const source_weights = try std.fmt.allocPrint(allocator, "{s}/model.safetensors", .{source_path});
+    const weights = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        source_weights,
+        allocator,
+        .limited(16 << 20),
+    ) catch |err| return skip_without_golden(err, source_weights);
+
+    const old_header_len = try safetensors.header_length(weights[0..safetensors.PrefixLen]);
+    const old_header_end = safetensors.PrefixLen + @as(usize, @intCast(old_header_len));
+    var closing_brace = old_header_end;
+    while (closing_brace > safetensors.PrefixLen and weights[closing_brace - 1] != '}') closing_brace -= 1;
+    if (closing_brace == safetensors.PrefixLen) return error.InvalidFixture;
+    closing_brace -= 1;
+    const original_header = weights[safetensors.PrefixLen..old_header_end];
+    const data_len = weights.len - old_header_end;
+    const added_tensor_name = "model.layers.0.self_attn.rotary_emb.inv_freq";
+    const new_header = try std.fmt.allocPrint(
+        allocator,
+        "{s},\"{s}\":{{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[{d},{d}]}}}}{s}",
+        .{ original_header[0 .. closing_brace - safetensors.PrefixLen], added_tensor_name, data_len, data_len + 8, original_header[closing_brace - safetensors.PrefixLen + 1 ..] },
+    );
+    const new_header_len = new_header.len;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try write_text_file(temporary.dir, "config.json", config);
+    var file = try temporary.dir.createFile(std.testing.io, "model.safetensors", .{});
+    defer file.close(std.testing.io);
+    var prefix: [safetensors.PrefixLen]u8 = undefined;
+    std.mem.writeInt(u64, &prefix, new_header_len, .little);
+    try file.writeStreamingAll(std.testing.io, &prefix);
+    try file.writeStreamingAll(std.testing.io, new_header);
+    try file.writeStreamingAll(std.testing.io, weights[old_header_end..]);
+    try file.writeStreamingAll(std.testing.io, &.{ 0, 0, 0, 0, 0, 0, 0, 0 });
+
+    var reads: usize = 0;
+    const checkpoint_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const result = try load_checkpoint_report_impl(allocator, std.testing.io, checkpoint_path, &reads);
+    const loaded = switch (result) {
+        .loaded => |model| model,
+        .rejected => return error.InvalidFixture,
+    };
+    try std.testing.expectEqual(@as(usize, 1), loaded.unused_tensors.len);
+    try std.testing.expectEqualStrings(added_tensor_name, loaded.unused_tensors[0].name);
+    try std.testing.expectEqual(safetensors.Dtype.F32, loaded.unused_tensors[0].dtype);
+    try std.testing.expectEqualSlices(u64, &.{2}, loaded.unused_tensors[0].shape);
+    try std.testing.expect(find_loaded_tensor(loaded.tensors, added_tensor_name) == null);
+    try std.testing.expectEqual(loaded.tensors.len, reads);
 }
 
 fn find_pickle_weights(io: std.Io, directory: std.Io.Dir) !?[]const u8 {
