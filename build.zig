@@ -43,12 +43,55 @@ pub fn build(b: *std.Build) void {
             .{ .name = "kernels", .module = kernels },
         },
     });
+    const ncm_norm = b.addModule("ncm_norm", .{
+        .root_source_file = b.path("src/ncm_norm.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "kernels", .module = kernels }},
+    });
+    const ncm_manifest = b.addModule("ncm_manifest", .{
+        .root_source_file = b.path("src/ncm_manifest.zig"),
+        .target = target,
+    });
+    const ncm_position = b.addModule("ncm_position", .{
+        .root_source_file = b.path("src/ncm_position.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "kernels", .module = kernels }},
+    });
+    const ncm_body = b.addModule("ncm_body", .{
+        .root_source_file = b.path("src/ncm_body.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "decoder", .module = decoder },
+            .{ .name = "hf_config", .module = hf_config },
+            .{ .name = "kernels", .module = kernels },
+            .{ .name = "ncm_norm", .module = ncm_norm },
+        },
+    });
+    const ncm_mask = b.addModule("ncm_mask", .{
+        .root_source_file = b.path("src/ncm_mask.zig"),
+        .target = target,
+    });
+    const ncm_model = b.addModule("ncm_model", .{
+        .root_source_file = b.path("src/ncm_model.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "kernels", .module = kernels },
+            .{ .name = "ncm_mask", .module = ncm_mask },
+            .{ .name = "ncm_norm", .module = ncm_norm },
+            .{ .name = "ncm_position", .module = ncm_position },
+        },
+    });
     const loader = b.addModule("loader", .{
         .root_source_file = b.path("src/loader.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "bf16", .module = bf16 },
             .{ .name = "decoder", .module = decoder },
+            .{ .name = "ncm_body", .module = ncm_body },
+            .{ .name = "ncm_mask", .module = ncm_mask },
+            .{ .name = "ncm_model", .module = ncm_model },
+            .{ .name = "ncm_position", .module = ncm_position },
+            .{ .name = "ncm_norm", .module = ncm_norm },
             .{ .name = "hf_config", .module = hf_config },
             .{ .name = "safetensors", .module = safetensors },
         },
@@ -77,7 +120,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
-    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, loader };
+    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader };
     for (library_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
