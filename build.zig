@@ -24,6 +24,23 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("packages/unicode_categories/root.zig"),
         .target = target,
     });
+    const nfc = b.addModule("nfc", .{
+        .root_source_file = b.path("packages/nfc/root.zig"),
+        .target = target,
+    });
+    const pretokenizers = b.addModule("pretokenizers", .{
+        .root_source_file = b.path("packages/pretokenizers/root.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "unicode_categories", .module = unicode_categories }},
+    });
+    const bpe = b.addModule("bpe", .{
+        .root_source_file = b.path("packages/bpe/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "nfc", .module = nfc },
+            .{ .name = "pretokenizers", .module = pretokenizers },
+        },
+    });
     const safetensors = b.addModule("safetensors", .{
         .root_source_file = b.path("packages/safetensors/root.zig"),
         .target = target,
@@ -130,7 +147,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
-    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader, ncm_transplant };
+    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, nfc, pretokenizers, bpe, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader, ncm_transplant };
     for (library_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);

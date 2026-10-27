@@ -28,7 +28,7 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 | 4 | Z1 Zig upgrade | Done after M0c |
 | 5 | M1 NCM dialect | Done |
 | 6 | M2 transplant | Done |
-| 7 | Tokenizers T0, T1, T2 | Not started |
+| 7 | Tokenizers T0, T1, T2 | Done |
 | 8 | Data, writer and VQ tokenizers | Not started. The Qwen3 route and the trained families are decided (D10, D14) |
 | 9 | M3 generator training | Not started |
 | 10 | M4 export and reload | Not started |
@@ -188,34 +188,34 @@ Gate: every transplanted tensor is bit-identical to its source after widening. T
 
 Goal: text in, token ids out, in Zig, for every family in PROJECT.md's tokenizer table. A Zig tokenizer is accepted only when its ids equal the T0 reference on the fixed corpus.
 
-**K0. Unicode 16.0.0 general categories.** Status: not started. Depends on: phase 1.
+**K0. Unicode 16.0.0 general categories.** Status: done. Depends on: phase 1.
 - Why: the regex pre-tokenizers and Digits must use the Unicode 16.0.0 tables that the reference's regex engine and Rust's `char::is_numeric` use (D57).
 - Work: generate a Unicode 16.0.0 category table with `tools/gen_unicode_categories.py` from the 16.0.0 `UnicodeData.txt` (SHA-256 `ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f`, 2,175,362 bytes, read 2026-10-26). The Unicode 18.0.0 table stays for the M0a API.
 - Done when: the 16.0.0 table gives the same general category as the 16.0.0 file for every code point (a test checks the file's ranges and a sample), and the file's hash is recorded in PROJECT.md (D57).
 
-**K1. T0 reference helper.** Status: not started. Depends on: phase 2.
+**K1. T0 reference helper.** Status: done. Depends on: phase 2.
 - Work: the Python helper runs `tokenizers==0.23.3` for each family and writes the ids of a fixed corpus, at test time, not committed. The corpus is a hand-written text file under `tools/corpus/`, committed. It holds ASCII text, non-ASCII letters, digits, emoji, combining marks and several whitespace variants.
 - Done when: the helper reproduces the ids of each family for the corpus, and two runs give the same output.
 
-**K2. Pre-tokenizers** (`packages/pretokenizers`). Status: not started. Depends on: K0.
+**K2. Pre-tokenizers** (`packages/pretokenizers`). Status: done. Depends on: K0.
 - Work: hand-written matchers for the Qwen Split (`Isolated`), the Llama 3 Split (`Isolated`), the GPT-2 ByteLevel regex, and Digits with `individual_digits` true and false (D54). Their semantics are: the leftmost alternative that matches at the current position; `\s` as the Oniguruma definition (U+0009 to U+000D, U+0085, and the categories Zl, Zp and Zs; `research/software_sources.md`, section B); and `\p{L}` and `\p{N}` from K0.
 - Done when: the pieces equal the T0 pieces on the corpus, including non-ASCII text.
 
-**K3. NFC normalizer tables.** Status: not started. Depends on: phase 2.
+**K3. NFC normalizer tables.** Status: done. Depends on: phase 2.
 - Work: generate the NFC tables from the Unicode 9.0.0 data: `UnicodeData.txt` (SHA-256 `68dfc414d28257b9b5d6ddbb8b466c768c00ebdf6cbf7784364a9b6cad55ee8f`, 1,686,443 bytes) and `CompositionExclusions.txt` (SHA-256 `5623df16856ad4007c60bdfff6f054e087521becd24cb4006be69c3a1d851aee`, 8,355 bytes), both read 2026-10-26. The reference uses `unicode-normalization-alignments` 0.1.12, which is Unicode 9.0.0 (D56).
 - Done when: the normalizer equals T0's NFC on the corpus, including composed and decomposed Latin letters, Hangul and combining sequences.
 
-**K4. Byte-level BPE** (`packages/bpe`). Status: not started. Depends on: K2, K3.
+**K4. Byte-level BPE** (`packages/bpe`). Status: done. Depends on: K2, K3.
 - Work: merges from `tokenizer.json` (as pairs or as strings), the byte-to-unicode table (`byte_level.rs` lines 15 to 39), `ignore_merges` (Llama 3), and the ByteLevel, Fuse and Strip decoders.
 - Done when: ids and decoded text equal T0's for Qwen2.5-0.5B, Qwen3-0.6B (both with NFC), Llama 3.0 8B and Llama 3.2-1B (with `ignore_merges`), and SmolLM2-135M (Digits, then ByteLevel).
 
-**K5. Gate T1.** Status: not started. Depends on: K4. Ids match T0 on the corpus for all five byte-level checkpoints, and decoding returns the text T0's decoder returns.
+**K5. Gate T1.** Status: done. Depends on: K4. Ids match T0 on the corpus for all five byte-level checkpoints, and decoding returns the text T0's decoder returns.
 
-**K6. SentencePiece-style tokenizers** (`packages/bpe`). Status: not started. Depends on: K1.
+**K6. SentencePiece-style tokenizers** (`packages/bpe`). Status: done. Depends on: K1.
 - Work: the Llama 2 normalizer (Prepend `▁`, then Replace `" "` with `▁`); the Mistral Metaspace pre-tokenizer (replacement `▁`, `prepend_scheme` `first`, `split` false); BPE with `byte_fallback` and `fuse_unk`; the ByteFallback, Fuse and Strip decoders; and the TemplateProcessing post-processor, which adds `<s>`.
 - Done when: ids and decoded text equal T0's for Llama 2, Mistral v0.1 and Mistral v0.3 on the corpus, including bytes outside the vocabulary.
 
-**K7. Gate T2.** Status: not started. Depends on: K6. Ids and decoded text match T0 for the three checkpoints.
+**K7. Gate T2.** Status: done. Depends on: K6. Ids and decoded text match T0 for the three checkpoints.
 
 ## Phase 8: Data, writer and VQ tokenizers
 

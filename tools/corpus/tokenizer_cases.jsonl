@@ -1,0 +1,15 @@
+{"name":"ascii","text":"Hello, world! This is a tokenizer check."}
+{"name":"contractions_and_punctuation","text":"I'm testing contractions: we're, you'll, they'd; punctuation—yes?!"}
+{"name":"unicode_casefold_contraction","text":"A'ſoo"}
+{"name":"literal_bos_between_text","text":"hello<s>world"}
+{"name":"literal_bos_at_start","text":"<s>world"}
+{"name":"unicode_letters","text":"café Ελληνικά 中文 हिन्दी עברית русский язык"}
+{"name":"digits_and_numbers","text":"0 123456789 ١٢٣ १२३ Ⅻ ¼"}
+{"name":"emoji","text":"🙂 👩‍🔬 🏳️‍🌈 🚀✨"}
+{"name":"byte_fallback_unassigned_scalar","text":"͸"}
+{"name":"combining_marks","text":"é é Å Å ऩ क़ 한글 한"}
+{"name":"whitespace","text":"leading  double\t tab\nline break\rreturn\r\nCRLF\u000bvertical\u000cform\u0085NEL NBSP line-separator paragraph-separator narrow-NBSP"}
+{"name":"leading_ascii_space","text":" leading"}
+{"name":"single_ascii_space","text":" "}
+{"name":"multiple_ascii_spaces","text":"  "}
+{"name":"empty","text":""}

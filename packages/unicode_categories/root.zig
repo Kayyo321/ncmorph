@@ -7,9 +7,12 @@
 
 const std = @import("std");
 const tables = @import("tables.zig");
+const tables_16 = @import("tables_16.zig");
 
 pub const Category = tables.Category;
 pub const UnicodeVersion = tables.Version;
+pub const Category16 = tables_16.Category;
+pub const UnicodeVersion16 = tables_16.Version;
 
 /// Returns the general category of `cp`. Code points that are not listed are unassigned (Cn).
 pub fn general_category(cp: u21) Category {
@@ -27,6 +30,40 @@ pub fn general_category(cp: u21) Category {
         }
     }
     return .Cn;
+}
+
+/// Returns the Unicode 16.0.0 general category of `cp`.
+pub fn general_category_16(cp: u21) Category16 {
+    var lo: usize = 0;
+    var hi: usize = tables_16.Ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const range = tables_16.Ranges[mid];
+        if (cp < range.first) {
+            hi = mid;
+        } else if (cp > range.last) {
+            lo = mid + 1;
+        } else {
+            return range.category;
+        }
+    }
+    return .Cn;
+}
+
+/// Unicode 16.0.0 group L: letters (`\p{L}`).
+pub fn is_letter_16(cp: u21) bool {
+    return switch (general_category_16(cp)) {
+        .Lu, .Ll, .Lt, .Lm, .Lo => true,
+        else => false,
+    };
+}
+
+/// Unicode 16.0.0 group N: numbers (`\p{N}`).
+pub fn is_number_16(cp: u21) bool {
+    return switch (general_category_16(cp)) {
+        .Nd, .Nl, .No => true,
+        else => false,
+    };
 }
 
 /// Unicode group L: letters (\p{L}).
@@ -135,4 +172,23 @@ test "the table covers every code point in order" {
 
 test "the table records the Unicode version" {
     try std.testing.expectEqualStrings("18.0.0", UnicodeVersion);
+}
+
+test "Unicode 16 ranges cover every code point in order" {
+    try std.testing.expectEqual(@as(u21, 0), tables_16.Ranges[0].first);
+    try std.testing.expectEqual(@as(u21, 0x10FFFF), tables_16.Ranges[tables_16.Ranges.len - 1].last);
+    for (tables_16.Ranges, 0..) |range, i| {
+        try std.testing.expect(range.first <= range.last);
+        if (i > 0) try std.testing.expectEqual(tables_16.Ranges[i - 1].last + 1, range.first);
+    }
+}
+
+test "Unicode 16 sample categories and version" {
+    try std.testing.expectEqualStrings("16.0.0", UnicodeVersion16);
+    try std.testing.expectEqual(Category16.Ll, general_category_16(0x00E9));
+    try std.testing.expectEqual(Category16.Mn, general_category_16(0x0301));
+    try std.testing.expectEqual(Category16.No, general_category_16(0x00B2));
+    try std.testing.expectEqual(Category16.Cn, general_category_16(0x0558));
+    try std.testing.expect(is_letter_16(0x4E00));
+    try std.testing.expect(is_number_16(0x2165));
 }
