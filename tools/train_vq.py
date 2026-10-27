@@ -29,6 +29,7 @@ RepositoryRoot = Path(__file__).resolve().parent.parent
 WindowFormat = struct.Struct("<I")
 DefaultLevels = [index * index for index in range(1, 33)]
 TorchVersion = "2.13.0"
+VqPrecisions = ("float32", "tf32", "bfloat16")
 
 
 def check_versions() -> None:
@@ -51,6 +52,48 @@ def _plan_cascade_strides(length: int, base: int = 4) -> list[int]:
         strides.append(base)
         remaining //= base
     return strides
+
+
+def _linear_upsample_plan(in_length: int, out_length: int, device) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Source indices and weights of F.interpolate(mode="linear", align_corners=False) at size out_length.
+
+    Follows aten/src/ATen/native/UpSample.h at the pinned torch: scale = in / out, source = (dst + 0.5) * scale - 0.5
+    clamped at 0, lower index floor(source), upper index min(lower + 1, in - 1), weights (1 - lambda, lambda).
+    """
+    scale = torch.tensor(float(in_length), dtype=torch.float32) / float(out_length)
+    destination = torch.arange(out_length, dtype=torch.float32)
+    source = ((destination + 0.5) * scale - 0.5).clamp_min(0.0)
+    lower = source.long()
+    upper = torch.where(lower < in_length - 1, lower + 1, lower)
+    upper_weight = source - lower.float()
+    lower_weight = 1.0 - upper_weight
+    return (lower.to(device), upper.to(device),
+            lower_weight.to(device)[None, :, None], upper_weight.to(device)[None, :, None])
+
+
+def _nearest_code(down: Tensor, codebook: Tensor) -> Tensor:
+    """Argmin of ||x||^2 + ||E||^2 - 2 x.E over the codebook; the per-row ||x||^2 does not change the argmin."""
+    flat = down.reshape(-1, down.shape[-1])
+    distances = torch.addmm(codebook.square().sum(-1), flat, codebook.t(), beta=1, alpha=-2)
+    return distances.argmin(dim=-1).view(down.shape[0], down.shape[1])
+
+
+def _phi_apply(value: Tensor, weight: Tensor, bias: Tensor) -> Tensor:
+    """0.5 * h + 0.5 * Conv1d(k=3)(h) on a B x L x C tensor, run as a channels-last 2-D convolution."""
+    batch, length, width = value.shape
+    lanes = value.reshape(batch, 1, length, width).permute(0, 3, 1, 2)
+    conv = functional.conv2d(lanes, weight.unsqueeze(2), bias, padding=(0, 1))
+    return 0.5 * value + 0.5 * conv.permute(0, 2, 3, 1).reshape(batch, length, width)
+
+
+def _level_step(up: Tensor, cumulative: Tensor, value: Tensor, weight: Tensor, bias: Tensor,
+                commitment: float, conv_autocast: bool) -> tuple[Tensor, Tensor]:
+    """One level of the replay: residual mixing, cumulative reconstruction and the D52 VQ terms."""
+    with torch.autocast(device_type=value.device.type, dtype=torch.bfloat16, enabled=conv_autocast):
+        contribution = _phi_apply(up, weight, bias)
+    cumulative = cumulative + contribution.float()
+    loss = commitment * functional.mse_loss(cumulative.detach(), value) + functional.mse_loss(cumulative, value.detach())
+    return cumulative, loss
 
 
 class _encoder_t(nn.Module):
@@ -76,7 +119,7 @@ class _phi_t(nn.Module):
         nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, value: Tensor) -> Tensor:
-        return 0.5 * value + 0.5 * functional.conv1d(value.transpose(1, 2), self.weight, self.bias, padding=1).transpose(1, 2)
+        return _phi_apply(value, self.weight, self.bias)
 
 
 class _vq_t(nn.Module):
@@ -99,6 +142,7 @@ class _vq_t(nn.Module):
             self.register_buffer(f"ema_w_{level_index}", embedding.weight.detach().clone())
             self.register_buffer(f"codebook_hit_{level_index}", torch.zeros(codebook_size, dtype=torch.int64))
             self.quant_resi.append(_phi_t(width))
+        self._upsample_plans: dict[tuple[int, str], tuple[Tensor, Tensor, Tensor, Tensor]] = {}
         self.learned_down_l1 = nn.ModuleList()
         self.learned_up_l1 = nn.ModuleList()
         strides = _plan_cascade_strides(levels[-1])
@@ -138,7 +182,14 @@ class _vq_t(nn.Module):
             return up.transpose(1, 2)
         if self.levels[level_index] == self.levels[-1]:
             return value
-        return functional.interpolate(value.transpose(1, 2), size=self.levels[-1], mode="linear").transpose(1, 2)
+        lower, upper, lower_weight, upper_weight = self._upsample_plan(level_index, value.device)
+        return lower_weight * value.index_select(1, lower) + upper_weight * value.index_select(1, upper)
+
+    def _upsample_plan(self, level_index: int, device) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        key = (level_index, str(device))
+        if key not in self._upsample_plans:
+            self._upsample_plans[key] = _linear_upsample_plan(self.levels[level_index], self.levels[-1], device)
+        return self._upsample_plans[key]
 
     @torch.no_grad()
     def _ema_update(self, level_index: int, vectors: Tensor, indices: Tensor) -> None:
@@ -165,9 +216,7 @@ class _vq_t(nn.Module):
         cumulative_levels = []
         for level_index, embedding in enumerate(self.embeddings):
             down = self._downsample(residual, level_index)
-            codebook = embedding.weight.float()
-            distances = down.square().sum(-1, keepdim=True) + codebook.square().sum(-1)[None, None, :] - 2 * down @ codebook.t()
-            indices = distances.argmin(dim=-1)
+            indices = _nearest_code(down, embedding.weight.float())
             if self.training:
                 self._ema_update(level_index, down.detach(), indices)
             quantized = functional.embedding(indices, embedding.weight.float())
@@ -354,59 +403,64 @@ def _learning_rate(step: int, total_steps: int, warmup_steps: int) -> float:
 
 def _train_batch_memory_bounded(model: vqvae_t, optimizer: torch.optim.Optimizer,
                                 parameters: list[nn.Parameter], batch: Tensor, microbatch_size: int,
-                                device: str) -> Tensor:
-    """Run one recipe-sized batch while keeping activation memory to one piece."""
-    if microbatch_size <= 0:
-        raise ValueError("microbatch_size must be positive")
+                                device: str, assign_chunk: int = 64, level_step=None,
+                                conv_autocast: bool = False) -> Tensor:
+    """Run one recipe-sized batch with D78 semantics and device-resident residuals (D84).
+
+    Pass 1 (no gradients) encodes the batch in microbatches, keeps every residual on the device, and for each
+    level assigns all positions against the old codebook in pieces of `assign_chunk` sequences, applies that
+    level's single EMA update, and subtracts the contribution computed from the updated codebook. Pass 2 replays
+    each microbatch with gradients against the stored assignments, one dropout cutoff and one optimizer update.
+    """
+    if microbatch_size <= 0 or assign_chunk <= 0:
+        raise ValueError("microbatch_size and assign_chunk must be positive")
+    step_fn = level_step or _level_step
     batch_size = batch.shape[0]
     chunks = [(start, min(start + microbatch_size, batch_size))
               for start in range(0, batch_size, microbatch_size)]
+    pieces = [(start, min(start + assign_chunk, batch_size)) for start in range(0, batch_size, assign_chunk)]
     device_type = device.split(":")[0]
+    is_cuda = device.startswith("cuda")
+    vq = model.vq
     saved_rng: list[tuple[Tensor, Tensor | None]] = []
-    encoded_chunks = []
     model.zero_grad(set_to_none=True)
     with torch.no_grad():
+        residual = torch.empty((batch_size, model.length, model.width), device=device, dtype=torch.float32)
         for start, end in chunks:
             cpu_state = torch.get_rng_state()
-            cuda_state = torch.cuda.get_rng_state(device) if device.startswith("cuda") else None
+            cuda_state = torch.cuda.get_rng_state(device) if is_cuda else None
             saved_rng.append((cpu_state, cuda_state))
             token_ids = batch[start:end].to(device=device, dtype=torch.long)
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16,
-                                enabled=device.startswith("cuda")):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=is_cuda):
                 encoded = model.encoder(token_ids)
                 encoded = model.pre_quant_norm(model.pre_quant_drop(encoded).transpose(1, 2)).transpose(1, 2)
-            encoded_chunks.append(encoded.float().cpu())
+            residual[start:end] = encoded.float()
 
-        residual_chunks = encoded_chunks
-        assignments: list[list[Tensor]] = [[] for _ in model.levels]
-        for level_index, embedding in enumerate(model.vq.embeddings):
+        assignments: list[Tensor] = []
+        for level_index, embedding in enumerate(vq.embeddings):
             counts = torch.zeros(embedding.num_embeddings, device=device, dtype=torch.float32)
             sums = torch.zeros_like(embedding.weight, device=device, dtype=torch.float32)
             touched = torch.zeros(embedding.num_embeddings, device=device, dtype=torch.bool)
-            level_indices = []
-            for residual_cpu in residual_chunks:
-                residual = residual_cpu.to(device=device)
-                down = model.vq._downsample(residual, level_index)
-                codebook = embedding.weight.float()
-                distances = down.square().sum(-1, keepdim=True) + codebook.square().sum(-1)[None, None, :] - 2 * down @ codebook.t()
-                indices = distances.argmin(dim=-1)
+            level_indices = torch.empty((batch_size, model.levels[level_index]), device=device, dtype=torch.long)
+            codebook = embedding.weight.float()
+            for start, end in pieces:
+                down = vq._downsample(residual[start:end], level_index)
+                indices = _nearest_code(down, codebook)
                 flat_indices = indices.reshape(-1)
-                vectors = down.reshape(-1, down.shape[-1])
                 counts.add_(torch.bincount(flat_indices, minlength=embedding.num_embeddings).float())
-                sums.index_add_(0, flat_indices, vectors)
+                sums.index_add_(0, flat_indices, down.reshape(-1, down.shape[-1]))
                 touched[flat_indices.unique()] = True
-                level_indices.append(indices.cpu())
-            model.vq._ema_update_aggregated(level_index, counts, sums, touched)
-            assignments[level_index] = level_indices
-            updated_chunks = []
-            for residual_cpu, indices in zip(residual_chunks, level_indices, strict=True):
-                residual = residual_cpu.to(device=device)
-                indices = indices.to(device=device, dtype=torch.long)
-                quantized = functional.embedding(indices, embedding.weight.float())
-                up = model.vq._upsample(quantized, level_index)
-                contribution = model.vq.quant_resi[level_index](up)
-                updated_chunks.append((residual - contribution.detach()).cpu())
-            residual_chunks = updated_chunks
+                level_indices[start:end] = indices
+            vq._ema_update_aggregated(level_index, counts, sums, touched)
+            assignments.append(level_indices)
+            codebook = embedding.weight.float()
+            phi = vq.quant_resi[level_index]
+            for start, end in pieces:
+                up = vq._upsample(functional.embedding(level_indices[start:end], codebook), level_index)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=conv_autocast):
+                    contribution = _phi_apply(up, phi.weight, phi.bias)
+                residual[start:end] -= contribution.float()
+        del residual
 
     # The cutoff is a property of the global batch. Pick it once, then replay each
     # piece from its encoder RNG state so encoder and decoder dropout match.
@@ -414,37 +468,49 @@ def _train_batch_memory_bounded(model: vqvae_t, optimizer: torch.optim.Optimizer
     if model.training and len(model.levels) > 1 and random.random() < 0.5:
         cutoff = random.randrange(0, len(model.levels) - 1)
     total_loss = torch.zeros((), device=device, dtype=torch.float32)
-    for chunk_index, (start, end) in enumerate(chunks):
-        cpu_state, cuda_state = saved_rng[chunk_index]
-        replay_stream_cpu = torch.get_rng_state()
-        replay_stream_cuda = torch.cuda.get_rng_state(device) if device.startswith("cuda") else None
-        torch.set_rng_state(cpu_state)
-        if cuda_state is not None:
-            torch.cuda.set_rng_state(cuda_state, device)
-        token_ids = batch[start:end].to(device=device, dtype=torch.long)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16,
-                            enabled=device.startswith("cuda")):
+    # One autocast region for the whole replay keeps the decoder's BF16 weight casts cached across microbatches.
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=is_cuda):
+        for chunk_index, (start, end) in enumerate(chunks):
+            cpu_state, cuda_state = saved_rng[chunk_index]
+            replay_stream_cpu = torch.get_rng_state()
+            replay_stream_cuda = torch.cuda.get_rng_state(device) if is_cuda else None
+            torch.set_rng_state(cpu_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state(cuda_state, device)
+            token_ids = batch[start:end].to(device=device, dtype=torch.long)
             encoded = model.encoder(token_ids)
             encoded = model.pre_quant_norm(model.pre_quant_drop(encoded).transpose(1, 2)).transpose(1, 2)
-        # The cached encoder RNG reproduces its first-pass dropout. Keep decoder
-        # dropout on the advancing global stream so chunks do not reuse masks.
-        torch.set_rng_state(replay_stream_cpu)
-        if replay_stream_cuda is not None:
-            torch.cuda.set_rng_state(replay_stream_cuda, device)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16,
-                            enabled=device.startswith("cuda")):
+            # The cached encoder RNG reproduces its first-pass dropout. Keep decoder
+            # dropout on the advancing global stream so chunks do not reuse masks.
+            torch.set_rng_state(replay_stream_cpu)
+            if replay_stream_cuda is not None:
+                torch.cuda.set_rng_state(replay_stream_cuda, device)
             with torch.autocast(device_type=device_type, enabled=False):
-                _, vq_loss, cumulative_levels = model.vq._forward_with_indices(
-                    encoded.float(), [indices[chunk_index] for indices in assignments])
-            reconstruction = cumulative_levels[cutoff]
-            straight_through = encoded.float() + (reconstruction - encoded.float()).detach()
+                value = encoded.float()
+                cumulative = torch.zeros_like(value)
+                losses = []
+                reconstruction = None
+                for level_index, embedding in enumerate(vq.embeddings):
+                    quantized = functional.embedding(assignments[level_index][start:end], embedding.weight.float())
+                    if level_index == 0:
+                        down = vq._downsample(value.detach(), 0)
+                        quantized = down + (quantized - down).detach()
+                    up = vq._upsample(quantized, level_index)
+                    phi = vq.quant_resi[level_index]
+                    cumulative, level_loss = step_fn(up, cumulative, value, phi.weight, phi.bias,
+                                                     vq.commitment_cost, conv_autocast)
+                    losses.append(level_loss)
+                    if level_index == cutoff:
+                        reconstruction = cumulative
+                vq_loss = torch.stack(losses).mean()
+                straight_through = value + (reconstruction - value).detach()
             logits = model.decoder(straight_through)
             reconstruction_loss = functional.cross_entropy(
                 logits.reshape(-1, model.vocab_size), token_ids.reshape(-1))
             loss = vq_loss + reconstruction_loss
-        (loss * ((end - start) / batch_size)).backward()
-        total_loss += loss.detach().float() * ((end - start) / batch_size)
-        del logits, reconstruction_loss, loss, vq_loss, cumulative_levels, reconstruction, straight_through, encoded
+            (loss * ((end - start) / batch_size)).backward()
+            total_loss += loss.detach().float() * ((end - start) / batch_size)
+            del logits, reconstruction_loss, loss, vq_loss, losses, reconstruction, straight_through, encoded, cumulative
     torch.nn.utils.clip_grad_norm_(parameters, 1.0)
     optimizer.step()
     return total_loss
@@ -615,8 +681,11 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
           heads: int = 6, batch_size: int = 768, updates: int = 78_432, warmup_steps: int = 1_000,
           seed: int = 42, max_steps: int | None = None, device: str | None = None, zig: str = "zig",
           microbatch_size: int = 8, resume: bool = False, checkpoint_every: int = 1_000,
-          stop_after: int | None = None, data_provenance: dict[str, Any] | None = None) -> Path:
+          stop_after: int | None = None, data_provenance: dict[str, Any] | None = None,
+          assign_chunk: int = 64, compile_levels: bool = True, vq_precision: str = "float32") -> Path:
     check_versions()
+    if vq_precision not in VqPrecisions:
+        raise ValueError(f"vq_precision must be one of {VqPrecisions}; got {vq_precision!r}")
     if output_dir.resolve() == RepositoryRoot or RepositoryRoot in output_dir.resolve().parents:
         raise ValueError("VQ output must be outside the ncmorph repository")
     level_sizes = list(levels if levels is not None else DefaultLevels)
@@ -645,8 +714,13 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
         raise ValueError(f"A1 summary reports {expected_windows} training windows; found {dataset.count}")
     if dataset.count < batch_size:
         raise ValueError(f"training data has {dataset.count} windows, fewer than batch size {batch_size}")
-    if microbatch_size <= 0:
-        raise ValueError("microbatch_size must be positive")
+    if microbatch_size <= 0 or assign_chunk <= 0:
+        raise ValueError("microbatch_size and assign_chunk must be positive")
+    # D85: float32 keeps the pinned torch defaults (TF32 off for matmul, cuDNN's default for convolutions);
+    # tf32 allows TF32 tensor-core matmul; bfloat16 runs the residual convolution under BF16 autocast.
+    torch.set_float32_matmul_precision("high" if vq_precision == "tf32" else "highest")
+    conv_autocast = vq_precision == "bfloat16" and device.startswith("cuda")
+    level_step = torch.compile(_level_step) if compile_levels and device.startswith("cuda") else None
     model = vqvae_t(vocab_size, length, width, level_sizes, codebook_size, heads).to(device)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -668,6 +742,9 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
                      "device": device, "precision": "bf16_mixed_f32_master"},
         "data": data_identity,
     }
+    if vq_precision != "float32":
+        # The default keeps the identity of checkpoints written before D85, so they stay resumable.
+        identity["training"]["vq_precision"] = vq_precision
     model.train()
     step = 0
     shuffle_rng = torch.Generator().manual_seed(seed)
@@ -736,7 +813,8 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
         batch = dataset.batch(epoch_order[batch_offset : batch_offset + batch_size])
         for group in optimizer.param_groups:
             group["lr"] = _learning_rate(step, total_steps, warmup_steps)
-        loss = _train_batch_memory_bounded(model, optimizer, parameters, batch, microbatch_size, device)
+        loss = _train_batch_memory_bounded(model, optimizer, parameters, batch, microbatch_size, device,
+                                           assign_chunk, level_step, conv_autocast)
         step += 1
         batch_offset += batch_size
         last_loss = float(loss.detach().float().item())
@@ -765,7 +843,7 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
         "recipe": {"updates": step, "global_batch": batch_size, "peak_learning_rate": 3e-4,
                    "learning_rate_floor": 3e-5, "warmup_updates": warmup_steps, "seed": seed,
                    "microbatch_size": microbatch_size, "precision": "bf16_mixed_f32_master",
-                   "weight_decay": 0.01, "gradient_clip": 1.0},
+                   "vq_precision": vq_precision, "weight_decay": 0.01, "gradient_clip": 1.0},
         "tensor_schema": specs,
         "tokenizer": {"filename": destination.name, "size_bytes": destination.stat().st_size,
                       "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "stored_dtype": "F32"},
@@ -798,6 +876,12 @@ def main() -> int:
     parser.add_argument("--stop-after", type=int, help="stop after this many updates in this invocation")
     parser.add_argument("--provenance-file", type=Path,
                         help="independently recorded provenance JSON required for legacy A1 summaries")
+    parser.add_argument("--assign-chunk", type=int, default=64,
+                        help="sequences per piece when assigning codes on the device (reduction order only)")
+    parser.add_argument("--no-compile-levels", action="store_true",
+                        help="do not fuse the replay's per-level step with torch.compile on CUDA")
+    parser.add_argument("--vq-precision", choices=VqPrecisions, default="float32",
+                        help="D85: float32 (default, pinned behavior), tf32 matmul, or bfloat16 residual convolution")
     parser.add_argument("--device")
     parser.add_argument("--zig", default="zig")
     args = parser.parse_args()
@@ -807,7 +891,8 @@ def main() -> int:
                      args.codebook_size, args.heads, args.batch_size, args.updates,
                      args.warmup_steps, args.seed, args.max_steps, args.device, args.zig, args.microbatch_size,
                      args.resume, args.checkpoint_every, args.stop_after,
-                     _read_provenance_file(args.provenance_file))
+                     _read_provenance_file(args.provenance_file), args.assign_chunk,
+                     not args.no_compile_levels, args.vq_precision)
     except (OSError, RuntimeError, ValueError, TypeError) as error:
         print(f"VQ training failed: {error}", file=sys.stderr)
         return 1

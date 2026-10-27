@@ -19,8 +19,10 @@ from unittest.mock import patch
 import torch
 from safetensors import safe_open
 
-from train_vq import (_hash_data, _optimizer_parameter_groups, _train_batch_memory_bounded,
-                      _training_data_provenance, train, vqvae_t)
+from torch.nn import functional
+
+from train_vq import (DefaultLevels, _hash_data, _linear_upsample_plan, _nearest_code, _optimizer_parameter_groups,
+                      _phi_apply, _train_batch_memory_bounded, _training_data_provenance, train, vqvae_t)
 from vq_checkpoint import load_latest, save_generation
 
 
@@ -293,6 +295,33 @@ class TrainVqTests(unittest.TestCase):
         natural.square().mean().backward()
         for layer_index, layer in enumerate(quantizer.learned_up_l1):
             torch.testing.assert_close(layer.weight.grad, actual_grads[layer_index], rtol=0.0, atol=0.0)
+
+    def test_linear_upsample_plan_matches_interpolate_at_every_owt_level(self) -> None:
+        torch.manual_seed(5)
+        worst = 0.0
+        for level in DefaultLevels[1:-1]:
+            value = torch.randn(3, level, 384)
+            lower, upper, lower_weight, upper_weight = _linear_upsample_plan(level, DefaultLevels[-1], value.device)
+            actual = lower_weight * value.index_select(1, lower) + upper_weight * value.index_select(1, upper)
+            expected = functional.interpolate(value.transpose(1, 2), size=DefaultLevels[-1], mode="linear").transpose(1, 2)
+            worst = max(worst, (actual - expected).abs().max().item())
+        self.assertLessEqual(worst, 1e-6)
+
+    def test_nearest_code_matches_full_distance_argmin(self) -> None:
+        torch.manual_seed(6)
+        down = torch.randn(4, 25, 384) * 3
+        codebook = torch.randn(4096, 384)
+        full = (down.square().sum(-1, keepdim=True) + codebook.square().sum(-1)[None, None, :]
+                - 2 * down @ codebook.t()).argmin(dim=-1)
+        self.assertTrue(torch.equal(_nearest_code(down, codebook), full))
+
+    def test_phi_apply_matches_conv1d_mixing(self) -> None:
+        torch.manual_seed(8)
+        value = torch.randn(2, 64, 384)
+        weight = torch.randn(384, 384, 3) * 0.05
+        bias = torch.randn(384) * 0.1
+        expected = 0.5 * value + 0.5 * functional.conv1d(value.transpose(1, 2), weight, bias, padding=1).transpose(1, 2)
+        torch.testing.assert_close(_phi_apply(value, weight, bias), expected, rtol=1e-5, atol=1e-5)
 
     def test_vq_ema_stays_float32_under_bfloat16_autocast(self) -> None:
         model = vqvae_t(vocab_size=17, length=16, width=8, levels=[1, 4, 16], codebook_size=4, heads=2)
