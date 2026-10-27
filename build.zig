@@ -45,6 +45,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("packages/safetensors/root.zig"),
         .target = target,
     });
+    const vq = b.addModule("vq", .{
+        .root_source_file = b.path("packages/vq/root.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "kernels", .module = kernels },
+            .{ .name = "safetensors", .module = safetensors },
+        },
+    });
+    if (target.result.os.tag == .linux) vq.linkSystemLibrary("m", .{});
     const hf_config = b.addModule("hf_config", .{
         .root_source_file = b.path("packages/hf_config/root.zig"),
         .target = target,
@@ -147,7 +157,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
-    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, nfc, pretokenizers, bpe, safetensors, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader, ncm_transplant };
+    const library_modules = [_]*std.Build.Module{ bf16, kernels, unicode_categories, nfc, pretokenizers, bpe, safetensors, vq, hf_config, decoder, ncm_norm, ncm_manifest, ncm_position, ncm_body, ncm_mask, ncm_model, loader, ncm_transplant };
     for (library_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);

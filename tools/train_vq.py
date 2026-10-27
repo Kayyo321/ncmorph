@@ -578,13 +578,44 @@ def _hash_data(paths: list[Path]) -> list[dict[str, Any]]:
     return result
 
 
+def _training_data_provenance(data_summary: dict[str, Any], explicit_provenance: dict[str, Any] | None) -> dict[str, Any]:
+    """Return recorded A1 identity, or require a separate record for legacy data."""
+    summary_identity = data_summary.get("identity")
+    if summary_identity is not None:
+        if not isinstance(summary_identity, dict) or not summary_identity:
+            raise ValueError("A1 summary identity must be a non-empty JSON object")
+        if explicit_provenance is not None and explicit_provenance != summary_identity:
+            raise ValueError("explicit data provenance does not match the A1 summary identity")
+        return summary_identity
+    if explicit_provenance is None:
+        raise ValueError(
+            "legacy A1 summary has no provenance identity; provide an independently recorded "
+            "JSON object with --provenance-file"
+        )
+    if not isinstance(explicit_provenance, dict) or not explicit_provenance:
+        raise ValueError("explicit data provenance must be a non-empty JSON object")
+    return explicit_provenance
+
+
+def _read_provenance_file(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read data provenance JSON {path}: {error}") from error
+    if not isinstance(value, dict) or not value:
+        raise ValueError("data provenance file must contain a non-empty JSON object")
+    return value
+
+
 def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str, source_repository: str,
           source_revision: str,
           length: int = 1024, levels: list[int] | None = None, width: int = 384, codebook_size: int = 4096,
           heads: int = 6, batch_size: int = 768, updates: int = 78_432, warmup_steps: int = 1_000,
           seed: int = 42, max_steps: int | None = None, device: str | None = None, zig: str = "zig",
           microbatch_size: int = 8, resume: bool = False, checkpoint_every: int = 1_000,
-          stop_after: int | None = None) -> Path:
+          stop_after: int | None = None, data_provenance: dict[str, Any] | None = None) -> Path:
     check_versions()
     if output_dir.resolve() == RepositoryRoot or RepositoryRoot in output_dir.resolve().parents:
         raise ValueError("VQ output must be outside the ncmorph repository")
@@ -598,6 +629,9 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
     if not summary_path.is_file():
         raise FileNotFoundError(f"A1 summary.json is missing from {data_dir}")
     data_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(data_summary, dict):
+        raise ValueError("A1 summary.json must contain a JSON object")
+    recorded_provenance = _training_data_provenance(data_summary, data_provenance)
     if data_summary.get("window_length") != length:
         raise ValueError(
             f"A1 data window_length is {data_summary.get('window_length')}; trainer length is {length}"
@@ -624,7 +658,7 @@ def train(data_dir: Path, output_dir: Path, vocab_size: int, source_family: str,
     if total_steps <= 0 or checkpoint_every <= 0 or (stop_after is not None and stop_after <= 0):
         raise ValueError("total updates, checkpoint interval, and stop_after must be positive")
     checkpoint_dir = output_dir / "checkpoints"
-    data_identity = {"summary": data_summary, "files": _hash_data(paths)}
+    data_identity = {"summary": data_summary, "provenance": recorded_provenance, "files": _hash_data(paths)}
     identity = {
         "model": {"vocab_size": vocab_size, "length": length, "levels": level_sizes, "width": width,
                   "codebook_size": codebook_size, "heads": heads, "dropout": 0.3},
@@ -762,6 +796,8 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true", help="resume from the latest complete checkpoint")
     parser.add_argument("--checkpoint-every", type=int, default=1_000)
     parser.add_argument("--stop-after", type=int, help="stop after this many updates in this invocation")
+    parser.add_argument("--provenance-file", type=Path,
+                        help="independently recorded provenance JSON required for legacy A1 summaries")
     parser.add_argument("--device")
     parser.add_argument("--zig", default="zig")
     args = parser.parse_args()
@@ -770,7 +806,8 @@ def main() -> int:
                      args.source_repository, args.source_revision, args.length, args.levels, args.width,
                      args.codebook_size, args.heads, args.batch_size, args.updates,
                      args.warmup_steps, args.seed, args.max_steps, args.device, args.zig, args.microbatch_size,
-                     args.resume, args.checkpoint_every, args.stop_after)
+                     args.resume, args.checkpoint_every, args.stop_after,
+                     _read_provenance_file(args.provenance_file))
     except (OSError, RuntimeError, ValueError, TypeError) as error:
         print(f"VQ training failed: {error}", file=sys.stderr)
         return 1

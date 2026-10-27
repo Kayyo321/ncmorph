@@ -19,11 +19,85 @@ from unittest.mock import patch
 import torch
 from safetensors import safe_open
 
-from train_vq import _hash_data, _optimizer_parameter_groups, _train_batch_memory_bounded, train, vqvae_t
+from train_vq import (_hash_data, _optimizer_parameter_groups, _train_batch_memory_bounded,
+                      _training_data_provenance, train, vqvae_t)
 from vq_checkpoint import load_latest, save_generation
 
 
+def expected_vq_tensor_schema(vocab_size: int, length: int, width: int, levels: list[int],
+                              codebook_size: int, heads: int) -> dict[str, tuple[tuple[int, ...], str]]:
+    """Derive the checkpoint inventory from the PROJECT/reference architecture, without a model instance."""
+    schema: dict[str, tuple[tuple[int, ...], str]] = {}
+
+    def add(name: str, shape: tuple[int, ...], dtype: str = "F32") -> None:
+        if name in schema:
+            raise AssertionError(f"duplicate expected VQ tensor: {name}")
+        schema[name] = (shape, dtype)
+
+    add("encoder.wte.weight", (vocab_size, width))
+    add("encoder.wpe.weight", (length, width))
+
+    for level_index, _level_size in enumerate(levels):
+        add(f"vq.embeddings.{level_index}.weight", (codebook_size, width))
+        add(f"vq.ema_cluster_size_{level_index}", (codebook_size,))
+        add(f"vq.ema_w_{level_index}", (codebook_size, width))
+        add(f"vq.codebook_hit_{level_index}", (codebook_size,), "I64")
+        add(f"vq.quant_resi.{level_index}.weight", (width, width, 3))
+        add(f"vq.quant_resi.{level_index}.bias", (width,))
+
+    # PROJECT.md's OWT tokenizer uses five stride-4 learned down and up convolutions.
+    remaining = length
+    cascade_strides = []
+    while remaining > 1:
+        if remaining % 4:
+            raise AssertionError("OWT level-0 learned resampling requires powers of four")
+        cascade_strides.append(4)
+        remaining //= 4
+    for layer_index, stride in enumerate(cascade_strides):
+        add(f"vq.learned_down_l1.{layer_index}.weight", (width, width, stride))
+        add(f"vq.learned_down_l1.{layer_index}.bias", (width,))
+    for layer_index, stride in enumerate(reversed(cascade_strides)):
+        add(f"vq.learned_up_l1.{layer_index}.weight", (width, width, stride))
+        add(f"vq.learned_up_l1.{layer_index}.bias", (width,))
+
+    head_width = width // heads
+    add("decoder.middle_block.ln_1.weight", (width,))
+    add("decoder.middle_block.ln_1.bias", (width,))
+    add("decoder.middle_block.attn.c_attn.weight", (3 * width, width))
+    add("decoder.middle_block.attn.c_attn.bias", (3 * width,))
+    add("decoder.middle_block.attn.c_proj.weight", (width, width))
+    add("decoder.middle_block.attn.c_proj.bias", (width,))
+    add("decoder.middle_block.attn.q_norm.weight", (head_width,))
+    add("decoder.middle_block.attn.k_norm.weight", (head_width,))
+    add("decoder.middle_block.ln_2.weight", (width,))
+    add("decoder.middle_block.ln_2.bias", (width,))
+    add("decoder.middle_block.mlp.c_fc.weight", (4 * width, width))
+    add("decoder.middle_block.mlp.c_fc.bias", (4 * width,))
+    add("decoder.middle_block.mlp.c_proj.weight", (width, 4 * width))
+    add("decoder.middle_block.mlp.c_proj.bias", (width,))
+    add("decoder.ln_f.weight", (width,))
+    add("decoder.output_layer.weight", (vocab_size, width))
+    return schema
+
+
 class TrainVqTests(unittest.TestCase):
+    def test_legacy_summary_requires_explicit_provenance(self) -> None:
+        legacy_summary = {"window_length": 16, "seed": 42}
+        with self.assertRaisesRegex(ValueError, "legacy A1 summary has no provenance"):
+            _training_data_provenance(legacy_summary, None)
+
+    def test_legacy_summary_binds_explicit_provenance_unchanged(self) -> None:
+        legacy_summary = {"window_length": 16, "seed": 42}
+        record = {"source": "independently recorded", "tokenizer_sha256": "known-digest"}
+        self.assertIs(_training_data_provenance(legacy_summary, record), record)
+
+    def test_embedded_summary_identity_rejects_conflicting_provenance(self) -> None:
+        summary_identity = {"input": "corpus", "tokenizer_sha256": "summary-digest"}
+        summary = {"identity": summary_identity}
+        conflicting_record = {"input": "corpus", "tokenizer_sha256": "other-digest"}
+        with self.assertRaisesRegex(ValueError, "does not match the A1 summary identity"):
+            _training_data_provenance(summary, conflicting_record)
+
     def test_memory_bounded_step_matches_full_batch_ema_loss_and_gradients(self) -> None:
         torch.manual_seed(13)
         random.seed(17)
@@ -137,6 +211,12 @@ class TrainVqTests(unittest.TestCase):
     def test_model_exports_reference_attribute_names_and_configured_shapes(self) -> None:
         model = vqvae_t(vocab_size=17, length=16, width=8, levels=[1, 4, 16], codebook_size=4, heads=2)
         state = model.state_dict()
+        expected_schema = expected_vq_tensor_schema(17, 16, 8, [1, 4, 16], 4, 2)
+        self.assertEqual(set(state), set(expected_schema))
+        for name, (shape, dtype) in expected_schema.items():
+            self.assertEqual(tuple(state[name].shape), shape, name)
+            expected_dtype = {"F32": torch.float32, "I64": torch.int64}[dtype]
+            self.assertEqual(state[name].dtype, expected_dtype, name)
         self.assertEqual(state["encoder.wte.weight"].shape, (17, 8))
         self.assertEqual(state["vq.embeddings.2.weight"].shape, (4, 8))
         self.assertEqual(state["vq.learned_down_l1.0.weight"].shape, (8, 8, 4))
@@ -157,6 +237,36 @@ class TrainVqTests(unittest.TestCase):
         torch.nn.functional.mse_loss(reconstruction, detached_encoder_value.detach()).backward()
         self.assertIsNone(detached_encoder_value.grad)
         self.assertIsNotNone(model.vq.learned_down_l1[0].weight.grad)
+
+    def test_full_owt_config_manifest_without_allocating_model(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        source_config = json.loads(
+            (root / "packages/hf_config/testdata/smollm2-135m/config.json").read_text(encoding="utf-8")
+        )
+        length = 1024
+        levels = [index * index for index in range(1, 33)]
+        schema = expected_vq_tensor_schema(
+            source_config["vocab_size"], length, 384, levels, 4096, 6
+        )
+        self.assertEqual(levels[-1], length)
+        self.assertEqual(len(schema), 230)
+        with torch.device("meta"):
+            model = vqvae_t(
+                source_config["vocab_size"], length, 384, levels, 4096, 6
+            )
+        state = model.state_dict()
+        self.assertEqual(set(state), set(schema))
+        for name, (shape, dtype) in schema.items():
+            self.assertEqual(tuple(state[name].shape), shape, name)
+            expected_dtype = {"F32": torch.float32, "I64": torch.int64}[dtype]
+            self.assertEqual(state[name].dtype, expected_dtype, name)
+        self.assertEqual(schema["encoder.wte.weight"], ((source_config["vocab_size"], 384), "F32"))
+        self.assertEqual(schema["encoder.wpe.weight"], ((length, 384), "F32"))
+        self.assertEqual(schema["vq.embeddings.31.weight"], ((4096, 384), "F32"))
+        self.assertEqual(schema["vq.learned_down_l1.4.weight"], ((384, 384, 4), "F32"))
+        self.assertEqual(schema["vq.learned_up_l1.4.weight"], ((384, 384, 4), "F32"))
+        self.assertEqual(schema["decoder.middle_block.attn.q_norm.weight"], ((64,), "F32"))
+        self.assertEqual(schema["decoder.output_layer.weight"], ((source_config["vocab_size"], 384), "F32"))
 
     def test_learned_up_l1_uses_reference_layer_names_in_forward_order(self) -> None:
         quantizer = vqvae_t(vocab_size=17, length=16, width=8, levels=[1, 4, 16],
@@ -224,16 +334,28 @@ class TrainVqTests(unittest.TestCase):
                 warmup_steps=2,
                 max_steps=1,
                 device="cpu",
+                data_provenance={"record": "synthetic fixture", "tokenizer_sha256": "test"},
             )
             self.assertTrue(output_path.is_file())
+            checkpoint_state = json.loads((output_dir / "checkpoints" / "generation-00000001" / "state.json")
+                                          .read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint_state["identity"]["data"]["provenance"],
+                             {"record": "synthetic fixture", "tokenizer_sha256": "test"})
             metadata = json.loads((output_dir / "ncm.json").read_text(encoding="utf-8"))
-            expected_names = {entry["name"] for entry in metadata["tensor_schema"]}
             self.assertEqual(metadata["tokenizer_config"]["level_sizes"], [1, 4, 16])
+            expected_schema = expected_vq_tensor_schema(13, 16, 8, [1, 4, 16], 4, 2)
+            expected_metadata_schema = [
+                {"name": name, "shape": list(shape), "dtype": dtype}
+                for name, (shape, dtype) in sorted(expected_schema.items())
+            ]
+            self.assertEqual(metadata["tensor_schema"], expected_metadata_schema)
             with safe_open(output_path, framework="pt", device="cpu") as file:
-                self.assertEqual(set(file.keys()), expected_names)
-                self.assertEqual(file.get_tensor("encoder.wte.weight").shape, (13, 8))
-                self.assertEqual(file.get_tensor("vq.embeddings.2.weight").shape, (4, 8))
-                self.assertEqual(file.get_tensor("decoder.output_layer.weight").shape, (13, 8))
+                self.assertEqual(set(file.keys()), set(expected_schema))
+                for name, (shape, dtype) in expected_schema.items():
+                    tensor = file.get_tensor(name)
+                    self.assertEqual(tuple(tensor.shape), shape, name)
+                    expected_dtype = {"F32": torch.float32, "I64": torch.int64}[dtype]
+                    self.assertEqual(tensor.dtype, expected_dtype, name)
                 self.assertEqual(file.metadata()["source_repository"], "synthetic/tokenizer-test")
                 self.assertEqual(file.metadata()["source_revision"], "test-only")
 
@@ -245,7 +367,9 @@ class TrainVqTests(unittest.TestCase):
             packed = data_dir / "train_epoch_0000.u32le"
             packed.write_bytes(struct.pack("<64I", *([index % 13 for index in range(64)])))
             (data_dir / "summary.json").write_text(
-                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 4, "epochs": 1}),
+                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 4, "epochs": 1,
+                            "identity": {"input": "synthetic", "tokenizer_sha256": "fixture-v1",
+                                         "eos_id": 9, "window_length": 16, "epochs": 1, "seed": 42}}),
                 encoding="utf-8",
             )
             parameters = dict(
@@ -257,6 +381,14 @@ class TrainVqTests(unittest.TestCase):
             )
             interrupted_dir = root / "interrupted"
             train(output_dir=interrupted_dir, stop_after=2, **parameters)
+            summary_path = data_dir / "summary.json"
+            original_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            changed_summary = {**original_summary,
+                               "identity": {**original_summary["identity"], "tokenizer_sha256": "fixture-v2"}}
+            summary_path.write_text(json.dumps(changed_summary), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                train(output_dir=interrupted_dir, resume=True, **parameters)
+            summary_path.write_text(json.dumps(original_summary), encoding="utf-8")
             train(output_dir=interrupted_dir, resume=True, **parameters)
             complete_dir = root / "complete"
             train(output_dir=complete_dir, **parameters)
@@ -281,7 +413,9 @@ class TrainVqTests(unittest.TestCase):
             data_dir.mkdir()
             (data_dir / "train_epoch_0000.u32le").write_bytes(struct.pack("<16I", *([1] * 16)))
             (data_dir / "summary.json").write_text(
-                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 1, "epochs": 1}),
+                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 1, "epochs": 1,
+                            "identity": {"input": "synthetic", "tokenizer_sha256": "fixture-v1",
+                                         "eos_id": 9, "window_length": 16, "epochs": 1, "seed": 42}}),
                 encoding="utf-8",
             )
             output_dir = root / "output"
@@ -319,7 +453,9 @@ class TrainVqTests(unittest.TestCase):
             data_dir.mkdir()
             (data_dir / "train_epoch_0000.u32le").write_bytes(struct.pack("<16I", *([1] * 16)))
             (data_dir / "summary.json").write_text(
-                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 1, "epochs": 1}),
+                json.dumps({"window_length": 16, "seed": 42, "training_windows_per_epoch": 1, "epochs": 1,
+                            "identity": {"input": "synthetic", "tokenizer_sha256": "fixture-v1",
+                                         "eos_id": 9, "window_length": 16, "epochs": 1, "seed": 42}}),
                 encoding="utf-8",
             )
             output_dir = root / "output"
@@ -413,6 +549,7 @@ def _checkpoint_identity(parameters):
                      "microbatch_size": parameters["microbatch_size"], "device": "cpu",
                      "precision": "bf16_mixed_f32_master"},
         "data": {"summary": summary,
+                 "provenance": summary.get("identity"),
                  "files": _hash_data(sorted(parameters["data_dir"].glob("train_epoch_*.u32le")))},
     }
 

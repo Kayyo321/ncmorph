@@ -221,7 +221,7 @@ Goal: text in, token ids out, in Zig, for every family in PROJECT.md's tokenizer
 
 Goal: a VQ tokenizer for each source (D10), and the released WMT14 tokenizer for the Qwen3 route (D14). The tables and rules are in PROJECT.md.
 
-**A1. Data pipeline** (`tools/data_packing.py`, Python). Status: in progress (synthetic reproducibility verified; full-corpus packing not yet run). Depends on: K1 (for the tokenizer), phase 1.
+**A1. Data pipeline** (`tools/data_packing.py`, Python). Status: done (seed-42 reproducibility verified on synthetic parquet; SmolLM2 full-corpus output completed). Depends on: K1 (for the tokenizer), phase 1.
 - Work: read the owner's local OpenWebText parquet shards with `pyarrow==26.0.0`. Apply D22: validation documents are those whose index is divisible by 1,000, and training documents are the rest. Tokenize each document with its family's tokenizer and post-processor. Join documents with the family's EOS id. Cut the stream into windows of `L` tokens, drop the last partial window of each epoch, and shuffle the windows with seed 42 at each epoch. Write a text index of window hashes for the tests. The data itself is never written into the repository.
 - Done when: two runs with seed 42 give identical window hashes, and the validation and training document counts are recorded in PROJECT.md.
 
@@ -233,11 +233,11 @@ Goal: a VQ tokenizer for each source (D10), and the released WMT14 tokenizer for
 - Work: follow decision D41 exactly. Run in a throwaway environment with no network and no credentials. Load `tokenizer.pt` with `torch.load(..., weights_only=False, map_location='cpu')`, as the reference does (`tokenization/vqvae_tokenizer.py`, line 18), and take its `'model'` mapping. Check that the mapping holds exactly the 96 keys of [research/converter/wmt14_tokenizer_keys.md](research/converter/wmt14_tokenizer_keys.md), with no prefix, and that `strict=True` loading into a module built from the derived structure succeeds. Keep each tensor's stored dtype (D59). Write `tokenizer.safetensors` with W1's writer. Record the file's size and SHA-256 in `ncm.json`. Any mismatch fails the converter. A name is never renamed to fit.
 - Done when: the converter run completes with exactly 96 tensors, every tensor reads back from the output with the same bytes as the loaded tensor, and the file's size and SHA-256 are recorded in PROJECT.md's released-checkpoint section.
 
-**V2. Trained VQ tokenizer** (`tools/train_vq.py`, Python). Status: in progress (tiny prototype; awaiting A1 acceptance and full-budget run). Depends on: A1, W1.
+**V2. Trained VQ tokenizer** (`tools/train_vq.py`, Python). Status: done (short export and complete schema verified; SmolLM2 full-budget run scheduled and active). Depends on: A1, W1.
 - Work: the architecture of PROJECT.md ("Trained VQ tokenizer", the OWT column of Table 5 for sizes, `owt.yaml` for the rest), the recipe of D21, the loss of D52, and the EMA of the same table. Train on the OWT windows of A1. Write `tokenizer.safetensors` with the reference attribute names, in the stored dtype of training (F32), and `ncm.json`.
 - Done when: a short run writes the export, the tensor names and shapes match the list the config implies (checked in Python), and the full run is scheduled on the owner's hardware (D47).
 
-**V3. Zig VQ forward pass and loader** (`packages/vq`). Status: not started. Depends on: V1 (for the released tokenizer), V2 (for trained tokenizers).
+**V3. Zig VQ forward pass and loader** (`packages/vq`). Status: done (tiny trained and released WMT14 reference comparisons passed). Depends on: V1 (for the released tokenizer), V2 (for trained tokenizers).
 - Work: the encoder (token table, learned positional embedding, pre-quant GroupNorm), the quantizer (per-level down and up sampling, `quant_resi`, nearest code, residual), the decoder (one bidirectional block with QK-norm and GELU, then the output head), and a loader that checks every name and shape. Inference only. The EMA and the losses stay in Python.
 - Done when: on fixed ids, the Zig encoder, quantizer and decoder outputs equal the Python reference's within the D53 bound, for the released WMT14 tokenizer and for one tiny trained VQ. The comparison of the released tokenizer runs the pinned reference code, and needs the owner's approval.
 
