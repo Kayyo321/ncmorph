@@ -6,6 +6,11 @@
 const std = @import("std");
 const bf16 = @import("bf16");
 const decoder = @import("decoder");
+const ncm_body = @import("ncm_body");
+const ncm_mask = @import("ncm_mask");
+const ncm_position = @import("ncm_position");
+const ncm_norm = @import("ncm_norm");
+const ncm_model = @import("ncm_model");
 const hf_config = @import("hf_config");
 const safetensors = @import("safetensors");
 
@@ -784,6 +789,394 @@ test "source decoder logits match all B9 Transformers golden cases" {
     std.debug.print("B9 overall maximum absolute logit error: {d:.17}\n", .{maximum_error});
 }
 
+test "NCM source-mode hidden states match Transformers across tiny families" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const case_names = [_][]const u8{ "llama_default", "llama_llama3", "qwen2", "qwen3", "mistral" };
+    var overall_maximum_error: f64 = 0;
+
+    for (case_names) |case_name| {
+        const allocator = arena.allocator();
+        const case_path = try std.fmt.allocPrint(allocator, "zig-out/golden/{s}", .{case_name});
+        const reference_path = try std.fmt.allocPrint(allocator, "{s}/reference.json", .{case_path});
+        const reference_bytes = std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            reference_path,
+            allocator,
+            .limited(10 * 1024 * 1024),
+        ) catch |err| return skip_without_golden(err, reference_path);
+        const reference = try std.json.parseFromSliceLeaky(std.json.Value, allocator, reference_bytes, .{});
+        const fields = switch (reference) {
+            .object => |object| object,
+            else => return error.InvalidFixture,
+        };
+        const token_values = switch (fields.get("token_ids") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        const token_ids = try allocator.alloc(usize, token_values.len);
+        for (token_values, token_ids) |value, *token_id| {
+            token_id.* = switch (value) {
+                .integer => |integer| @intCast(integer),
+                else => return error.InvalidFixture,
+            };
+        }
+
+        const loaded = try load_checkpoint(allocator, std.testing.io, case_path);
+        const hidden_size: usize = @intCast(loaded.spec.hidden_size);
+        const layer_count: usize = @intCast(loaded.spec.num_hidden_layers);
+        const row_size = token_ids.len * hidden_size;
+        const actual = try allocator.alloc(f32, (layer_count + 1) * row_size);
+        try ncm_body.forward_source_mode(allocator, loaded.spec, loaded.weights, token_ids, actual);
+
+        const states = switch (fields.get("hidden_states") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(layer_count + 1, states.len);
+        var case_maximum_error: f64 = 0;
+        for (states, 0..) |state_value, state_index| {
+            const batches = switch (state_value) {
+                .array => |array| array.items,
+                else => return error.InvalidFixture,
+            };
+            try std.testing.expectEqual(@as(usize, 1), batches.len);
+            const token_rows = switch (batches[0]) {
+                .array => |array| array.items,
+                else => return error.InvalidFixture,
+            };
+            try std.testing.expectEqual(token_ids.len, token_rows.len);
+            for (token_rows, 0..) |row_value, token_index| {
+                const row = switch (row_value) {
+                    .array => |array| array.items,
+                    else => return error.InvalidFixture,
+                };
+                try std.testing.expectEqual(hidden_size, row.len);
+                var row_maximum: f64 = 0;
+                for (row) |value| row_maximum = @max(row_maximum, @abs(try json_number(value)));
+                const tolerance = 1e-4 * @max(1.0, row_maximum);
+                for (row, 0..) |value, hidden_index| {
+                    const expected = try json_number(value);
+                    const actual_value = actual[state_index * row_size + token_index * hidden_size + hidden_index];
+                    const difference = @abs(@as(f64, actual_value) - expected);
+                    case_maximum_error = @max(case_maximum_error, difference);
+                    overall_maximum_error = @max(overall_maximum_error, difference);
+                    try std.testing.expect(within_tolerance(actual_value, expected, tolerance));
+                }
+            }
+        }
+        std.debug.print("N6 {s} maximum absolute hidden-state difference: {d:.17}\n", .{ case_name, case_maximum_error });
+    }
+    std.debug.print("N6 overall maximum absolute hidden-state difference: {d:.17}\n", .{overall_maximum_error});
+}
+
+test "N8 NCM source mode matches M0 decoder hidden states" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const case_names = [_][]const u8{ "llama_default", "llama_llama3", "qwen2", "qwen3", "mistral" };
+    var overall_maximum_error: f64 = 0;
+
+    for (case_names) |case_name| {
+        const allocator = arena.allocator();
+        const case_path = try std.fmt.allocPrint(allocator, "zig-out/golden/{s}", .{case_name});
+        const reference_path = try std.fmt.allocPrint(allocator, "{s}/reference.json", .{case_path});
+        const reference_bytes = std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            reference_path,
+            allocator,
+            .limited(10 * 1024 * 1024),
+        ) catch |err| return skip_without_golden(err, reference_path);
+        const reference = try std.json.parseFromSliceLeaky(std.json.Value, allocator, reference_bytes, .{});
+        const fields = switch (reference) {
+            .object => |object| object,
+            else => return error.InvalidFixture,
+        };
+        const token_values = switch (fields.get("token_ids") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        const token_ids = try allocator.alloc(usize, token_values.len);
+        for (token_values, token_ids) |value, *token_id| token_id.* = @intCast(try json_integer(value));
+
+        const loaded = try load_checkpoint(allocator, std.testing.io, case_path);
+        const hidden_size: usize = @intCast(loaded.spec.hidden_size);
+        const intermediate_size: usize = @intCast(loaded.spec.intermediate_size);
+        const layer_count: usize = @intCast(loaded.spec.num_hidden_layers);
+        const query_width: usize = @intCast(loaded.spec.num_attention_heads * loaded.spec.head_dim);
+        const row_size = token_ids.len * hidden_size;
+        const logits = try allocator.alloc(f32, token_ids.len * @as(usize, @intCast(loaded.spec.vocab_size)));
+        const trace = try allocate_decoder_trace(allocator, token_ids.len, hidden_size, intermediate_size, query_width, layer_count);
+        try decoder.forward_with_trace(allocator, loaded.spec, loaded.weights, token_ids, logits, trace);
+
+        const final_block_offset = (layer_count - 1) * row_size;
+        const m0_final = try allocator.alloc(f32, row_size);
+        ncm_norm.rms_norm_rows(trace.block_output[final_block_offset..][0..row_size], loaded.weights.final_norm, m0_final, token_ids.len, hidden_size, @floatCast(loaded.spec.rms_norm_eps));
+        const m0_states = try allocator.alloc(f32, (layer_count + 1) * row_size);
+        @memcpy(m0_states[0..row_size], trace.block_input);
+        for (1..layer_count) |state_index| {
+            const source_offset = (state_index - 1) * row_size;
+            @memcpy(m0_states[state_index * row_size ..][0..row_size], trace.block_output[source_offset..][0..row_size]);
+        }
+        @memcpy(m0_states[layer_count * row_size ..][0..row_size], m0_final);
+
+        const q_width = @as(usize, @intCast(loaded.spec.num_attention_heads)) * @as(usize, @intCast(loaded.spec.head_dim));
+        const kv_width = @as(usize, @intCast(loaded.spec.num_key_value_heads)) * @as(usize, @intCast(loaded.spec.head_dim));
+        const fused_width = q_width + 2 * kv_width;
+        const ncm_layers = try allocator.alloc(ncm_model.layer_weights_t, layer_count);
+        for (loaded.weights.layers, ncm_layers) |layer, *ncm_layer| {
+            const fused_weight = try allocator.alloc(f32, fused_width * hidden_size);
+            var weight_offset: usize = 0;
+            const attention_parts = [_][]const f32{ layer.attention.query_weight, layer.attention.key_weight, layer.attention.value_weight };
+            for (attention_parts) |part| {
+                @memcpy(fused_weight[weight_offset..][0..part.len], part);
+                weight_offset += part.len;
+            }
+            const has_qkv_bias = layer.attention.query_bias != null or layer.attention.key_bias != null or layer.attention.value_bias != null;
+            const fused_bias: ?[]f32 = if (has_qkv_bias) try allocator.alloc(f32, fused_width) else null;
+            if (fused_bias) |bias| {
+                set_bias_part(bias, 0, q_width, layer.attention.query_bias);
+                set_bias_part(bias, q_width, kv_width, layer.attention.key_bias);
+                set_bias_part(bias, q_width + kv_width, kv_width, layer.attention.value_bias);
+            }
+            ncm_layer.* = .{
+                .fused_qkv_weight = fused_weight,
+                .fused_qkv_bias = fused_bias,
+                .output_weight = layer.attention.output_weight,
+                .output_bias = layer.attention.output_bias,
+                .query_norm_weight = layer.attention.query_norm_weight,
+                .key_norm_weight = layer.attention.key_norm_weight,
+                .ln_1_weight = layer.input_norm,
+                .gate_weight = layer.gate_weight,
+                .gate_bias = layer.gate_bias,
+                .up_weight = layer.up_weight,
+                .up_bias = layer.up_bias,
+                .down_weight = layer.down_weight,
+                .down_bias = layer.down_bias,
+                .ln_2_weight = layer.post_attention_norm,
+            };
+        }
+        const identity = try allocator.alloc(f32, hidden_size * hidden_size);
+        @memset(identity, 0);
+        for (0..hidden_size) |index| identity[index * hidden_size + index] = 1;
+        const zero_bias = try allocator.alloc(f32, hidden_size);
+        @memset(zero_bias, 0);
+        const zeros = try allocator.alloc(f32, layer_count * hidden_size);
+        @memset(zeros, 0);
+        const token_inputs = try allocator.alloc(f32, row_size);
+        for (token_ids, 0..) |token_id, index| @memcpy(token_inputs[index * hidden_size ..][0..hidden_size], loaded.weights.embed_tokens[token_id * hidden_size ..][0..hidden_size]);
+        const rope_type: ncm_model.rope_type_t = switch (loaded.spec.rope_scaling) {
+            .Default => .Default,
+            .Llama3 => .Llama3,
+        };
+        const ncm_output = try allocator.alloc(f32, row_size);
+        const ncm_states = try allocator.alloc(f32, (layer_count + 1) * row_size);
+        const source_config: ncm_model.config_t = .{
+            .hidden_size = hidden_size,
+            .vq_width = hidden_size,
+            .num_attention_heads = @intCast(loaded.spec.num_attention_heads),
+            .num_key_value_heads = @intCast(loaded.spec.num_key_value_heads),
+            .head_dim = @intCast(loaded.spec.head_dim),
+            .intermediate_size = intermediate_size,
+            .rms_norm_epsilon = @floatCast(loaded.spec.rms_norm_eps),
+            .rope_type = rope_type,
+            .rope_theta = @floatCast(loaded.spec.rope_theta),
+            .rope_factor = if (loaded.spec.rope_scaling == .Llama3) @floatCast(loaded.spec.rope_scaling.Llama3.factor) else 1,
+            .rope_low_freq_factor = if (loaded.spec.rope_scaling == .Llama3) @floatCast(loaded.spec.rope_scaling.Llama3.low_freq_factor) else 1,
+            .rope_high_freq_factor = if (loaded.spec.rope_scaling == .Llama3) @floatCast(loaded.spec.rope_scaling.Llama3.high_freq_factor) else 4,
+            .rope_original_max_position_embeddings = if (loaded.spec.rope_scaling == .Llama3) @intCast(loaded.spec.rope_scaling.Llama3.original_max_position_embeddings) else 8192,
+            .level_lengths = &.{token_ids.len},
+            .prefix_length = 0,
+            .query_level0 = false,
+            .use_level_encoding = false,
+            .source_causal = true,
+            .sliding_window = if (loaded.spec.sliding_window) |window| @intCast(window) else null,
+        };
+        try ncm_model.forward_with_trace(allocator, source_config, .{
+            .prefix_token_embedding = &.{},
+            .prefix_vocab_size = 0,
+            .input_projection = identity,
+            .input_projection_bias = zero_bias,
+            .level_embedding = zeros,
+            .l0_queries = &.{},
+            .final_norm_weight = loaded.weights.final_norm,
+            .layers = ncm_layers,
+        }, &.{}, &.{}, token_inputs, ncm_output, ncm_states);
+
+        var case_maximum_error: f64 = 0;
+        for (ncm_states, m0_states) |actual, expected| {
+            const difference = @abs(@as(f64, actual) - expected);
+            case_maximum_error = @max(case_maximum_error, difference);
+            overall_maximum_error = @max(overall_maximum_error, difference);
+            try std.testing.expect(within_tolerance(actual, expected, 1e-4));
+        }
+        std.debug.print("N8 {s} maximum absolute hidden-state difference: {d:.17}\n", .{ case_name, case_maximum_error });
+    }
+    std.debug.print("N8 overall maximum absolute hidden-state difference: {d:.17}\n", .{overall_maximum_error});
+}
+
+fn set_bias_part(destination: []f32, offset: usize, width: usize, source: ?[]const f32) void {
+    if (source) |values| @memcpy(destination[offset..][0..width], values) else @memset(destination[offset..][0..width], 0);
+}
+
+test "NCM masks and level positions match pinned NCM tiny models" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const reference_path = "zig-out/golden/ncm_masks_positions.json";
+    const reference_bytes = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        reference_path,
+        allocator,
+        .limited(2 * 1024 * 1024),
+    ) catch |err| return skip_without_golden(err, reference_path);
+    const reference = try std.json.parseFromSliceLeaky(std.json.Value, allocator, reference_bytes, .{});
+    const fields = switch (reference) {
+        .object => |object| object,
+        else => return error.InvalidFixture,
+    };
+    const commit = switch (fields.get("ncm_commit") orelse return error.InvalidFixture) {
+        .string => |value| value,
+        else => return error.InvalidFixture,
+    };
+    try std.testing.expectEqualStrings("c70274273f489abc73832b2b98584a8483b6b203", commit);
+    const cases = switch (fields.get("cases") orelse return error.InvalidFixture) {
+        .array => |array| array.items,
+        else => return error.InvalidFixture,
+    };
+
+    for (cases) |case_value| {
+        const case = switch (case_value) {
+            .object => |object| object,
+            else => return error.InvalidFixture,
+        };
+        const prefix_length: usize = @intCast(try json_integer(case.get("prefix_length") orelse return error.InvalidFixture));
+        const level_values = switch (case.get("level_lengths") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        const level_lengths = try allocator.alloc(usize, level_values.len);
+        var target_length: usize = 0;
+        for (level_values, level_lengths) |value, *level_length| {
+            level_length.* = @intCast(try json_integer(value));
+            target_length += level_length.*;
+        }
+        const sequence_length = prefix_length + target_length;
+        const positions = try allocator.alloc(usize, sequence_length);
+        try ncm_position.fill_level_positions(prefix_length, level_lengths, positions);
+        const head_dim: usize = 4;
+        const cosine = try allocator.alloc(f32, sequence_length * head_dim);
+        const sine = try allocator.alloc(f32, sequence_length * head_dim);
+        try ncm_position.default_tables_at_positions(allocator, head_dim, 10_000, positions, cosine, sine);
+        try compare_rope_matrix(case.get("rope_cos") orelse return error.InvalidFixture, sequence_length, head_dim, cosine);
+        try compare_rope_matrix(case.get("rope_sin") orelse return error.InvalidFixture, sequence_length, head_dim, sine);
+        const expected_positions = switch (case.get("positions") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(sequence_length, expected_positions.len);
+        for (expected_positions, positions) |expected, actual| try std.testing.expectEqual(
+            try json_integer(expected),
+            @as(i64, @intCast(actual)),
+        );
+
+        const per_level = switch (case.get("per_level_positions") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(level_lengths.len, per_level.len);
+        for (level_lengths, per_level) |level_length, level_positions_value| {
+            const level_positions = switch (level_positions_value) {
+                .array => |array| array.items,
+                else => return error.InvalidFixture,
+            };
+            try std.testing.expectEqual(prefix_length + level_length, level_positions.len);
+            for (0..prefix_length) |position| try std.testing.expectEqual(
+                @as(i64, @intCast(position)),
+                try json_integer(level_positions[position]),
+            );
+            for (0..level_length) |position| try std.testing.expectEqual(
+                @as(i64, @intCast(position)),
+                try json_integer(level_positions[prefix_length + position]),
+            );
+        }
+
+        const expected_cos_generators = switch (case.get("rope_cos_gen") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        const expected_sin_generators = switch (case.get("rope_sin_gen") orelse return error.InvalidFixture) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(level_lengths.len, expected_cos_generators.len);
+        try std.testing.expectEqual(level_lengths.len, expected_sin_generators.len);
+        for (level_lengths, 0..) |level_length, level_index| {
+            const generator_positions = try allocator.alloc(usize, prefix_length + level_length);
+            for (0..prefix_length) |position| generator_positions[position] = position;
+            for (0..level_length) |position| generator_positions[prefix_length + position] = position;
+            const generator_cosine = try allocator.alloc(f32, generator_positions.len * head_dim);
+            const generator_sine = try allocator.alloc(f32, generator_positions.len * head_dim);
+            try ncm_position.default_tables_at_positions(allocator, head_dim, 10_000, generator_positions, generator_cosine, generator_sine);
+            try compare_rope_matrix(expected_cos_generators[level_index], generator_positions.len, head_dim, generator_cosine);
+            try compare_rope_matrix(expected_sin_generators[level_index], generator_positions.len, head_dim, generator_sine);
+        }
+
+        const convolution = switch (case.get("post_upsample_conv") orelse return error.InvalidFixture) {
+            .object => |object| object,
+            else => return error.InvalidFixture,
+        };
+        const convolution_rows: usize = @intCast(try json_integer(convolution.get("row_count") orelse return error.InvalidFixture));
+        const convolution_width: usize = @intCast(try json_integer(convolution.get("width") orelse return error.InvalidFixture));
+        const convolution_weight = try json_f32_array(allocator, convolution.get("weight") orelse return error.InvalidFixture);
+        const convolution_bias = try json_f32_array(allocator, convolution.get("bias") orelse return error.InvalidFixture);
+        const convolution_input = try json_f32_array(allocator, convolution.get("input") orelse return error.InvalidFixture);
+        const convolution_expected = try json_f32_array(allocator, convolution.get("output") orelse return error.InvalidFixture);
+        try std.testing.expectEqual(level_lengths[0], convolution_rows);
+        const convolution_actual = try allocator.dupe(f32, convolution_input);
+        try ncm_model.apply_post_upsample_conv(convolution_actual, .{ .weight = convolution_weight, .bias = convolution_bias }, convolution_rows, convolution_width, allocator);
+        try std.testing.expectEqualSlices(f32, convolution_expected, convolution_actual);
+
+        const mask = try allocator.alloc(bool, sequence_length * sequence_length);
+        try ncm_mask.block_diagonal_mask(prefix_length, level_lengths, &.{}, mask);
+        try compare_json_mask(case.get("mask") orelse return error.InvalidFixture, sequence_length, mask);
+        const prefix_pad_mask = try allocator.alloc(bool, prefix_length);
+        @memset(prefix_pad_mask, false);
+        if (prefix_length != 0) prefix_pad_mask[prefix_length - 1] = true;
+        try ncm_mask.block_diagonal_mask(prefix_length, level_lengths, prefix_pad_mask, mask);
+        try compare_json_mask(case.get("padded_mask") orelse return error.InvalidFixture, sequence_length, mask);
+    }
+}
+
+fn json_f32_array(allocator: Allocator, value: std.json.Value) ![]f32 {
+    const items = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidFixture,
+    };
+    const output = try allocator.alloc(f32, items.len);
+    for (items, output) |item, *number| number.* = @floatCast(try json_number(item));
+    return output;
+}
+
+fn compare_rope_matrix(value: std.json.Value, row_count: usize, width: usize, actual: []const f32) !void {
+    const rows = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidFixture,
+    };
+    try std.testing.expectEqual(row_count, rows.len);
+    try std.testing.expectEqual(row_count * width, actual.len);
+    for (rows, 0..) |row_value, row_index| {
+        const row = switch (row_value) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(width, row.len);
+        for (row, 0..) |expected_value, column| {
+            const expected = try json_number(expected_value);
+            try std.testing.expect(within_tolerance(actual[row_index * width + column], expected, 1e-6));
+        }
+    }
+}
+
 test "C2-C5 real checkpoint logits match pinned Transformers" {
     const env_ptr = std.c.getenv("NCMORPH_CHECKPOINT_DIR") orelse {
         std.debug.print("SKIP real-checkpoint acceptance: set NCMORPH_CHECKPOINT_DIR to a directory with the C2-C5 fixtures\n", .{});
@@ -1046,6 +1439,66 @@ fn json_number(value: std.json.Value) !f64 {
         .integer => |number| @floatFromInt(number),
         else => error.InvalidFixture,
     };
+}
+
+fn json_integer(value: std.json.Value) !i64 {
+    return switch (value) {
+        .integer => |number| number,
+        else => error.InvalidFixture,
+    };
+}
+
+fn allocate_decoder_trace(
+    allocator: Allocator,
+    token_count: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    query_width: usize,
+    layer_count: usize,
+) !decoder.decoder_trace_t {
+    const hidden_length = layer_count * token_count * hidden_size;
+    const intermediate_length = layer_count * token_count * intermediate_size;
+    const context_length = layer_count * token_count * query_width;
+    return .{
+        .token_count = token_count,
+        .hidden_size = hidden_size,
+        .intermediate_size = intermediate_size,
+        .query_width = query_width,
+        .layer_count = layer_count,
+        .block_input = try allocator.alloc(f32, token_count * hidden_size),
+        .attention_context = try allocator.alloc(f32, context_length),
+        .input_norm = try allocator.alloc(f32, hidden_length),
+        .attention_output = try allocator.alloc(f32, hidden_length),
+        .attention_residual = try allocator.alloc(f32, hidden_length),
+        .post_attention_norm = try allocator.alloc(f32, hidden_length),
+        .gate_projection = try allocator.alloc(f32, intermediate_length),
+        .up_projection = try allocator.alloc(f32, intermediate_length),
+        .gate_up_product = try allocator.alloc(f32, intermediate_length),
+        .mlp_output = try allocator.alloc(f32, hidden_length),
+        .block_output = try allocator.alloc(f32, hidden_length),
+    };
+}
+
+fn compare_json_mask(expected_value: std.json.Value, sequence_length: usize, actual: []const bool) !void {
+    const rows = switch (expected_value) {
+        .array => |array| array.items,
+        else => return error.InvalidFixture,
+    };
+    try std.testing.expectEqual(sequence_length, rows.len);
+    for (rows, 0..) |row_value, query_index| {
+        const row = switch (row_value) {
+            .array => |array| array.items,
+            else => return error.InvalidFixture,
+        };
+        try std.testing.expectEqual(sequence_length, row.len);
+        for (row, 0..) |value, key_index| {
+            const expected = switch (value) {
+                .bool => |boolean| boolean,
+                else => return error.InvalidFixture,
+            };
+            try std.testing.expectEqual(expected, actual[query_index * sequence_length + key_index]);
+        }
+    }
 }
 
 fn trace_stage(trace: decoder.decoder_trace_t, name: []const u8, layer_index: usize) ?[]const f32 {

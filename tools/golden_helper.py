@@ -365,6 +365,7 @@ def generate(output_dir: Path, seed: int) -> None:
                 "sin": tensor_values(sine, torch),
             },
             "layer_0_output": tensor_values(layer_0_output, torch),
+            "hidden_states": [tensor_values(state, torch) for state in outputs.hidden_states],
             "logits": tensor_values(outputs.logits, torch),
             "bf16_logits": tensor_values(bf16_outputs.logits, torch),
             "attention_mask": attention_mask.tolist(),

@@ -26,8 +26,8 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 | 2 | M0b source decoder in F32 | Done |
 | 3 | M0c real checkpoints | Done |
 | 4 | Z1 Zig upgrade | Done after M0c |
-| 5 | M1 NCM dialect | Next: step N1 |
-| 6 | M2 transplant | Not started |
+| 5 | M1 NCM dialect | Done |
+| 6 | M2 transplant | Next: step M2.1 |
 | 7 | Tokenizers T0, T1, T2 | Not started |
 | 8 | Data, writer and VQ tokenizers | Not started. The Qwen3 route and the trained families are decided (D10, D14) |
 | 9 | M3 generator training | Not started |
@@ -154,23 +154,23 @@ Facts this phase relies on, all from the pinned reference (commit `c70274273f489
 - `models/common.py` (`SelfAttention`, `MLP`, `Block`): the fused `c_attn` is split into q, k and v, then `c_proj`, `q_norm` and `k_norm`, `w_gate`, `w_up` and `c_proj` for the gated MLP.
 - `models/next_concept.py` (`NextConceptTransformer`): `transformer.wte` is a Linear from the VQ width to `n_embd` (lines 131 to 133), then the blocks, then `ln_f`. The codebook-tied heads are `_TiedCodebookHead` (lines 9 to 34).
 
-**N1. Confirm the NCM field table.** Status: not started. Depends on: Z1.
-- Work: every row of the "NCM generator (ncmorph's dialect)" table in PROJECT.md names a decision (D8, D9, D13, D15, D18, D20, D24, D30 to D33) and the pinned code path it follows. Check each row against the pinned file it names, and correct the table, with a decision entry, where it does not match.
-- Done when: each row has its decision and its citation, and each citation has been read.
+**N1. Confirm the NCM field table.** Status: done. Depends on: Z1.
+- Work: every row of the "NCM generator (ncmorph's dialect)" table in PROJECT.md names a decision (D8, D9, D13, D15, D18, D20, D24, D30 to D33) and the pinned code path it follows. Each row was checked against the pinned file it names. D70 corrects the row-count description for `wle` by distinguishing this dialect's `query_level0: true` from the pinned reference's conditional allocation. D71 records that source-mode parity intentionally adapts the reference's LayerNorm baseline to source-epsilon RMSNorm.
+- Done: each row has its decision and pinned citation, and each cited path was read at commit `c70274273f489abc73832b2b98584a8483b6b203`.
 
-**N2. RMSNorm option.** Status: not started. Depends on: N1. Use it for `ln_1`, `ln_2` and `ln_f`, with `eps` taken from the source's `rms_norm_eps`. The fixtures use 1e-5 and 1e-6, so `eps` cannot be a constant. Done when: an NCM norm equals the B2 RMSNorm on random inputs, within the D53 bound.
+**N2. RMSNorm option.** Status: done. Depends on: N1. Added `src/ncm_norm.zig`, which applies the B2 RMSNorm kernel row-wise with the caller-supplied source `rms_norm_eps`; epsilon remains runtime-configurable. A seeded test compares the NCM adapter exactly with B2 on random inputs at both fixture epsilon values, 1e-5 and 1e-6. Registered the module in the build and test graph.
 
-**N3. Separate bias flags.** Status: not started. Depends on: N1. `qkv_bias`, `o_bias`, `mlp_bias` and `norm_bias`. The reference has one `bias` flag for every linear layer and every LayerNorm (`config/eval/owt.yaml` line 9). Done when: each flag adds exactly its own tensors, checked against the manifest on a synthetic configuration.
+**N3. Separate bias flags.** Status: done. Depends on: N1. Decision D72 defines `qkv_bias`, `o_bias`, `mlp_bias` and `norm_bias` separately from the reference's shared `bias` flag (`config/eval/owt.yaml` line 9). `src/ncm_manifest.zig` builds the optional bias manifest tensors, and its synthetic two-layer test enables each flag independently and checks names, shapes and counts.
 
-**N4. Explicit `head_dim` and `intermediate_size`.** Status: not started. Depends on: N1. The q width is `n_heads · head_dim`, and the output projection maps it back to `n_embd`. The MLP width comes from `intermediate_size`, not from the reference's gated formula. Done when: the shapes of Qwen3-0.6B (q of width 2048 from hidden size 1024) and Qwen3-4B (q of width 4096 from hidden size 2560) match the manifest.
+**N4. Explicit `head_dim` and `intermediate_size`.** Status: done. Depends on: N1. `src/ncm_manifest.zig` calculates q width as `n_heads · head_dim`, maps the attention output projection from that width to `n_embd`, and uses source `intermediate_size` for the MLP tensors. Synthetic shape tests use verified Qwen3-0.6B and Qwen3-4B fixture dimensions: q widths 2048 and 4096, respectively, with MLP widths 3072 and 9728.
 
-**N5. `llama3` RoPE in NCM positions.** Status: not started. Depends on: B4. Reuse the function from B4. Done when: NCM positions equal the B4 values.
+**N5. `llama3` RoPE in NCM positions.** Status: done. Depends on: B4. `src/ncm_position.zig` builds Llama 3 inverse frequencies with B4 and gathers cosine/sine rows at explicit position ids, allowing per-level restarts. The test checks exact equality against B4-generated tables for positions `[0, 1, 2, 0, 1, 0]`.
 
-**N6. Source mode.** Status: not started. Depends on: N2 to N5. A causal mask over one RoPE sequence, used only for reduction tests. Done when: the source-mode NCM body equals the B7 decoder on the same tiny model, within the D53 bound.
+**N6. Source mode.** Status: done. Depends on: N2 to N5. Added `src/ncm_body.zig`, a causal single-sequence source-mode body using the shared kernels. `tools/golden_helper.py` now writes every Transformers hidden state for the five tiny family cases, and the loader gate compares embedding, intermediate, and final-normalized states against those independently generated references. The overall maximum absolute difference was `4.768371582e-7`, within D53.
 
-**N7. NCM mode.** Status: not started. Depends on: N6. Block-diagonal attention (D8), per-level RoPE restarts, level embeddings `wle`, learned level-0 queries `l0_queries` (D15), and the prefix rules of PROJECT.md. Done when: masks and per-level positions equal the pinned reference's on random tiny NCM models built from the pinned classes by the golden helper. This step runs pinned NCM code, and it needs the owner's approval for its session.
+**N7. NCM mode.** Status: done. Depends on: N6. `src/ncm_model.zig` executes the continuous NCM body: prefix ids pass through the supplied VQ encoder table and `transformer.wte`; `l0_queries` replace the level-0 input; `wle` is added per target level; optional post-upsample Conv1d residuals follow D73; the mask, padding rules and restarted RoPE positions drive attention; and RMSNorm, fused QKV/GQA attention and SwiGLU blocks run to final hidden states. Its synthetic execution test verifies prefix lookup, level embedding, query replacement, and finite outputs with a fully padded prefix across two transformer layers. `src/ncm_mask.zig` and `src/ncm_position.zig` are compared against test-time references from the pinned `NextConceptTransformer` on two tiny model configurations. Base/padded masks, flattened/per-level positions and the `rope_cos`, `rope_sin`, `rope_cos_gen_k` and `rope_sin_gen_k` tables match the pinned model. A pinned post-upsample convolution output is also compared numerically. The authorized reference run is implemented by `tools/ncm_golden_helper.py`, which checks the reference commit before importing the pinned class.
 
-**N8. Gate test.** Status: not started. Depends on: N6, N7. Source-mode NCM hidden states equal the M0 hidden states within the D53 bound, on the tiny models of B0.
+**N8. Gate test.** Status: done. Depends on: N6, N7. In addition to N6's independent Transformers hidden-state goldens, the N8 gate maps each family’s split decoder Q/K/V tensors into the actual fused `ncm_model` executor, runs it with identity WTE, source-causal mask and source sliding-window/RoPE settings, and compares embedding, every intermediate block state and final-normalized states against `decoder.forward_with_trace`. All states matched exactly across five tiny families; maximum absolute difference was `0.0`.
 
 ## Phase 6: M2 transplant
 

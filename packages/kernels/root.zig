@@ -538,11 +538,13 @@ fn attention_impl(
         for (0..query_heads) |head_index| {
             const query_start = query_index * query_width + head_index * head_dim;
             const key_value_head = head_index / group_count;
+            var any_key_allowed = false;
             for (0..token_count) |key_index| {
                 if (!config.attention_mask[query_index * token_count + key_index]) {
                     scores[key_index] = -std.math.inf(f32);
                     continue;
                 }
+                any_key_allowed = true;
                 const key_start = key_index * key_value_width + key_value_head * head_dim;
                 var score: f32 = 0;
                 for (0..head_dim) |dimension| {
@@ -551,9 +553,13 @@ fn attention_impl(
                 const score_value = maybe_round_bf16(score, bf16_mode);
                 scores[key_index] = maybe_round_bf16(score_value * scale, bf16_mode);
             }
-            softmax(scores, probabilities);
-            if (bf16_mode) {
-                for (probabilities) |*probability| probability.* = round_bf16(probability.*);
+            if (any_key_allowed) {
+                softmax(scores, probabilities);
+                if (bf16_mode) {
+                    for (probabilities) |*probability| probability.* = round_bf16(probability.*);
+                }
+            } else {
+                @memset(probabilities, 0);
             }
 
             const context_start = query_index * query_width + head_index * head_dim;
@@ -1057,6 +1063,42 @@ test "Qwen3 attention with grouped heads, biases and QK-norm matches golden outp
         }
     }
     std.debug.print("B5 maximum absolute attention-output error: {d:.12}\n", .{max_error});
+}
+
+test "attention returns zero context for a fully masked query before output bias" {
+    const allocator = std.testing.allocator;
+    const input = [_]f32{ 2, -3 };
+    const projection = [_]f32{ 1, 0, 0, 1 };
+    const output_bias = [_]f32{ 0.25, -0.5 };
+    const cosine = [_]f32{ 1, 1 };
+    const sine = [_]f32{ 0, 0 };
+    const attention_mask = [_]bool{false};
+    var output: [2]f32 = undefined;
+
+    try attention(
+        allocator,
+        &input,
+        .{
+            .query_weight = &projection,
+            .key_weight = &projection,
+            .value_weight = &projection,
+            .output_weight = &projection,
+            .output_bias = &output_bias,
+        },
+        .{
+            .token_count = 1,
+            .hidden_size = 2,
+            .num_attention_heads = 1,
+            .num_key_value_heads = 1,
+            .head_dim = 2,
+            .rms_norm_epsilon = 1e-5,
+            .cosine = &cosine,
+            .sine = &sine,
+            .attention_mask = &attention_mask,
+        },
+        &output,
+    );
+    try std.testing.expectEqualSlices(f32, &output_bias, &output);
 }
 
 test "causal and sliding-window masks match transformers golden masks" {
