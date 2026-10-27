@@ -24,9 +24,9 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 |---|---|---|
 | 1 | M0a `inspect` | Done |
 | 2 | M0b source decoder in F32 | Done |
-| 3 | M0c real checkpoints | Not started |
+| 3 | M0c real checkpoints | Done |
 | 4 | Z1 Zig upgrade | Done after M0c |
-| 5 | M1 NCM dialect | Not started |
+| 5 | M1 NCM dialect | Next: step N1 |
 | 6 | M2 transplant | Not started |
 | 7 | Tokenizers T0, T1, T2 | Not started |
 | 8 | Data, writer and VQ tokenizers | Not started. The Qwen3 route and the trained families are decided (D10, D14) |
