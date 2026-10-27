@@ -29,7 +29,7 @@ The roadmap has no dates and no durations. The order of the steps and their "Don
 | 5 | M1 NCM dialect | Done |
 | 6 | M2 transplant | Done |
 | 7 | Tokenizers T0, T1, T2 | Done |
-| 8 | Data, writer and VQ tokenizers | Not started. The Qwen3 route and the trained families are decided (D10, D14) |
+| 8 | Data, writer and VQ tokenizers | In progress. The Qwen3 route and the trained families are decided (D10, D14) |
 | 9 | M3 generator training | Not started |
 | 10 | M4 export and reload | Not started |
 | 11 | Package split | Waiting for its trigger |
@@ -221,19 +221,19 @@ Goal: text in, token ids out, in Zig, for every family in PROJECT.md's tokenizer
 
 Goal: a VQ tokenizer for each source (D10), and the released WMT14 tokenizer for the Qwen3 route (D14). The tables and rules are in PROJECT.md.
 
-**A1. Data pipeline** (`tools/data_packing.py`, Python). Status: not started. Depends on: K1 (for the tokenizer), phase 1.
+**A1. Data pipeline** (`tools/data_packing.py`, Python). Status: in progress (synthetic reproducibility verified; full-corpus packing not yet run). Depends on: K1 (for the tokenizer), phase 1.
 - Work: read the owner's local OpenWebText parquet shards with `pyarrow==26.0.0`. Apply D22: validation documents are those whose index is divisible by 1,000, and training documents are the rest. Tokenize each document with its family's tokenizer and post-processor. Join documents with the family's EOS id. Cut the stream into windows of `L` tokens, drop the last partial window of each epoch, and shuffle the windows with seed 42 at each epoch. Write a text index of window hashes for the tests. The data itself is never written into the repository.
 - Done when: two runs with seed 42 give identical window hashes, and the validation and training document counts are recorded in PROJECT.md.
 
-**W1. Safetensors writer** (`packages/safetensors`). Status: not started. Depends on: phase 1.
+**W1. Safetensors writer** (`packages/safetensors`). Status: done. Depends on: phase 1.
 - Work: write files that follow the writer rules of PROJECT.md ("Writer rules", D39) and `safetensors/src/tensor.rs` at v0.8.0. Use checked arithmetic for every size and offset.
 - Done when: a round trip through the Zig reader and the Python `safetensors==0.8.0` reader gives identical tensors, and the writer rejects duplicate names and unsupported dtypes.
 
-**V1. Released WMT14 tokenizer conversion** (`tools/convert_wmt14_tokenizer.py`). Status: not started. Depends on: W1. Needs the owner's approval, as set out above.
+**V1. Released WMT14 tokenizer conversion** (`tools/convert_wmt14_tokenizer.py`). Status: done. Depends on: W1. Needs the owner's approval, as set out above.
 - Work: follow decision D41 exactly. Run in a throwaway environment with no network and no credentials. Load `tokenizer.pt` with `torch.load(..., weights_only=False, map_location='cpu')`, as the reference does (`tokenization/vqvae_tokenizer.py`, line 18), and take its `'model'` mapping. Check that the mapping holds exactly the 96 keys of [research/converter/wmt14_tokenizer_keys.md](research/converter/wmt14_tokenizer_keys.md), with no prefix, and that `strict=True` loading into a module built from the derived structure succeeds. Keep each tensor's stored dtype (D59). Write `tokenizer.safetensors` with W1's writer. Record the file's size and SHA-256 in `ncm.json`. Any mismatch fails the converter. A name is never renamed to fit.
 - Done when: the converter run completes with exactly 96 tensors, every tensor reads back from the output with the same bytes as the loaded tensor, and the file's size and SHA-256 are recorded in PROJECT.md's released-checkpoint section.
 
-**V2. Trained VQ tokenizer** (`tools/train_vq.py`, Python). Status: not started. Depends on: A1, W1.
+**V2. Trained VQ tokenizer** (`tools/train_vq.py`, Python). Status: in progress (tiny prototype; awaiting A1 acceptance and full-budget run). Depends on: A1, W1.
 - Work: the architecture of PROJECT.md ("Trained VQ tokenizer", the OWT column of Table 5 for sizes, `owt.yaml` for the rest), the recipe of D21, the loss of D52, and the EMA of the same table. Train on the OWT windows of A1. Write `tokenizer.safetensors` with the reference attribute names, in the stored dtype of training (F32), and `ncm.json`.
 - Done when: a short run writes the export, the tensor names and shapes match the list the config implies (checked in Python), and the full run is scheduled on the owner's hardware (D47).
 

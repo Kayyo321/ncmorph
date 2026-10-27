@@ -1,7 +1,7 @@
 //
 // Ko, (Baczynski-Bruce) 2026; Apache 2.0
 //
-//! Reader for the safetensors header and the sharded index. The checks follow the reference
+//! Reader and writer for safetensors headers and the sharded index. The checks follow the reference
 //! implementation, huggingface/safetensors (safetensors/src/tensor.rs): the header is at most
 //! 100 MB, tensors sorted by data offset are contiguous from zero, each tensor's byte size
 //! matches its shape and dtype, and the file is exactly the 8-byte prefix, the header and the data.
@@ -143,6 +143,164 @@ pub const index_t = struct {
     /// "metadata.total_size" when present.
     total_size: ?u64,
 };
+
+/// A tensor payload in row-major, little-endian byte order.
+pub const tensor_data_t = struct {
+    name: []const u8,
+    dtype: Dtype,
+    shape: []const u64,
+    data: []const u8,
+};
+
+/// One string-to-string entry in the optional safetensors metadata map.
+pub const metadata_entry_t = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const write_error_t = error{
+    DuplicateName,
+    ReservedName,
+    UnsupportedDtype,
+    InvalidUtf8,
+    ShapeOverflow,
+    MisalignedBits,
+    SizeMismatch,
+    HeaderTooLarge,
+    FileTooLarge,
+};
+
+/// Serializes tensors using the v0.8.0 ordering and layout. The returned allocation belongs to
+/// `arena`. Sub-byte dtypes are rejected because this API accepts whole-byte tensor payloads.
+pub fn serialize(arena: Allocator, tensors: []const tensor_data_t, metadata: ?[]const metadata_entry_t) ![]u8 {
+    const ordered = try arena.dupe(tensor_data_t, tensors);
+    for (ordered, 0..) |tensor, index| {
+        if (!std.unicode.utf8ValidateSlice(tensor.name)) return error.InvalidUtf8;
+        if (std.mem.eql(u8, tensor.name, "__metadata__")) return error.ReservedName;
+        for (ordered[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.name, tensor.name)) return error.DuplicateName;
+        }
+        try validate_tensor(tensor);
+    }
+    if (metadata) |entries| {
+        for (entries, 0..) |entry, index| {
+            if (!std.unicode.utf8ValidateSlice(entry.key) or !std.unicode.utf8ValidateSlice(entry.value)) return error.InvalidUtf8;
+            for (entries[0..index]) |prior| {
+                if (std.mem.eql(u8, prior.key, entry.key)) return error.DuplicateName;
+            }
+        }
+    }
+    std.mem.sort(tensor_data_t, ordered, {}, less_than_dtype_name);
+
+    var data_len: u64 = 0;
+    for (ordered) |tensor| {
+        data_len = std.math.add(u64, data_len, std.math.cast(u64, tensor.data.len) orelse return error.FileTooLarge) catch return error.FileTooLarge;
+    }
+
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(arena);
+    try header.append(arena, '{');
+    if (metadata) |entries| {
+        try append_json_string(arena, &header, "__metadata__");
+        try header.appendSlice(arena, ":{");
+        const sorted_metadata = try arena.dupe(metadata_entry_t, entries);
+        std.mem.sort(metadata_entry_t, sorted_metadata, {}, less_than_metadata_key);
+        for (sorted_metadata, 0..) |entry, index| {
+            if (index != 0) try header.append(arena, ',');
+            try append_json_string(arena, &header, entry.key);
+            try header.append(arena, ':');
+            try append_json_string(arena, &header, entry.value);
+        }
+        try header.append(arena, '}');
+        if (ordered.len != 0) try header.append(arena, ',');
+    }
+
+    var offset: u64 = 0;
+    for (ordered, 0..) |tensor, index| {
+        if (index != 0) try header.append(arena, ',');
+        try append_json_string(arena, &header, tensor.name);
+        const next_offset = std.math.add(u64, offset, std.math.cast(u64, tensor.data.len) orelse return error.FileTooLarge) catch return error.FileTooLarge;
+        const shape_text = try std.json.Stringify.valueAlloc(arena, tensor.shape, .{ .whitespace = .minified });
+        const entry_text = try std.fmt.allocPrint(arena, ":{{\"dtype\":\"{s}\",\"shape\":{s},\"data_offsets\":[{d},{d}]}}", .{ dtype_name(tensor.dtype), shape_text, offset, next_offset });
+        try header.appendSlice(arena, entry_text);
+        offset = next_offset;
+    }
+    try header.append(arena, '}');
+
+    const aligned_header_len = std.math.add(usize, header.items.len, 7) catch return error.HeaderTooLarge;
+    const padded_header_len = aligned_header_len & ~@as(usize, 7);
+    if (padded_header_len > MaxHeaderSize) return error.HeaderTooLarge;
+    const prefix_and_header = std.math.add(usize, PrefixLen, padded_header_len) catch return error.FileTooLarge;
+    const header_end = std.math.add(usize, PrefixLen, header.items.len) catch return error.FileTooLarge;
+    const data_len_usize = std.math.cast(usize, data_len) orelse return error.FileTooLarge;
+    const total_len = std.math.add(usize, prefix_and_header, data_len_usize) catch return error.FileTooLarge;
+    const output = try arena.alloc(u8, total_len);
+    std.mem.writeInt(u64, output[0..PrefixLen], padded_header_len, .little);
+    @memcpy(output[PrefixLen..header_end], header.items);
+    @memset(output[header_end..prefix_and_header], ' ');
+    var data_offset = prefix_and_header;
+    for (ordered) |tensor| {
+        const end = std.math.add(usize, data_offset, tensor.data.len) catch return error.FileTooLarge;
+        @memcpy(output[data_offset..end], tensor.data);
+        data_offset = end;
+    }
+    return output;
+}
+
+fn validate_tensor(tensor: tensor_data_t) write_error_t!void {
+    if (tensor.dtype == .F4 or tensor.dtype == .F6E2m3 or tensor.dtype == .F6E3m2) return error.UnsupportedDtype;
+    var elements: u64 = 1;
+    for (tensor.shape) |dimension| {
+        elements = std.math.mul(u64, elements, dimension) catch return error.ShapeOverflow;
+    }
+    const bit_count = std.math.mul(u64, elements, tensor.dtype.bit_size()) catch return error.ShapeOverflow;
+    if (bit_count % 8 != 0) return error.MisalignedBits;
+    const expected = bit_count / 8;
+    if (expected != (std.math.cast(u64, tensor.data.len) orelse return error.SizeMismatch)) return error.SizeMismatch;
+}
+
+fn append_json_string(arena: Allocator, output: *std.ArrayList(u8), value: []const u8) !void {
+    const json = try std.json.Stringify.valueAlloc(arena, value, .{ .whitespace = .minified });
+    try output.appendSlice(arena, json);
+}
+
+fn dtype_order(dtype: Dtype) u8 {
+    return switch (dtype) {
+        .Bool => 0,
+        .F4 => 1,
+        .F6E2m3 => 2,
+        .F6E3m2 => 3,
+        .U8 => 4,
+        .I8 => 5,
+        .F8E5m2 => 6,
+        .F8E4m3 => 7,
+        .F8E8m0 => 8,
+        .F8E4m3fnuz => 9,
+        .F8E5m2fnuz => 10,
+        .I16 => 11,
+        .U16 => 12,
+        .F16 => 13,
+        .Bf16 => 14,
+        .I32 => 15,
+        .U32 => 16,
+        .F32 => 17,
+        .C64 => 18,
+        .F64 => 19,
+        .I64 => 20,
+        .U64 => 21,
+    };
+}
+
+fn less_than_dtype_name(_: void, left: tensor_data_t, right: tensor_data_t) bool {
+    const left_order = dtype_order(left.dtype);
+    const right_order = dtype_order(right.dtype);
+    if (left_order != right_order) return left_order > right_order;
+    return std.mem.lessThan(u8, left.name, right.name);
+}
+
+fn less_than_metadata_key(_: void, left: metadata_entry_t, right: metadata_entry_t) bool {
+    return std.mem.lessThan(u8, left.key, right.key);
+}
 
 /// Reads the header length from the first 8 bytes of a file.
 pub fn header_length(prefix: []const u8) parse_error_t!u64 {
@@ -436,4 +594,62 @@ test "parses a sharded index and rejects unsafe shard names" {
         \\{"weight_map":{"a":"../escape.safetensors"}}
     ;
     try std.testing.expectError(error.UnsafeShardName, parse_index(arena.allocator(), unsafe));
+}
+
+test "serializes and parses ordered tensors with metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tensors = [_]tensor_data_t{
+        .{ .name = "z_float", .dtype = .F32, .shape = &.{2}, .data = &.{ 1, 2, 3, 4, 5, 6, 7, 8 } },
+        .{ .name = "a_half", .dtype = .F16, .shape = &.{1}, .data = &.{ 9, 10 } },
+        .{ .name = "a_float", .dtype = .F32, .shape = &.{1}, .data = &.{ 11, 12, 13, 14 } },
+    };
+    const metadata = [_]metadata_entry_t{
+        .{ .key = "source_revision", .value = "abc" },
+        .{ .key = "format", .value = "1" },
+    };
+    const bytes = try serialize(arena.allocator(), &tensors, &metadata);
+    const header = try parse_header(arena.allocator(), bytes, bytes.len);
+    try std.testing.expectEqual(@as(usize, 3), header.tensors.len);
+    try std.testing.expectEqualStrings("a_float", header.tensors[0].name);
+    try std.testing.expectEqualStrings("z_float", header.tensors[1].name);
+    try std.testing.expectEqualStrings("a_half", header.tensors[2].name);
+    try std.testing.expectEqual(@as(u64, 14), header.data_len);
+    const header_json = std.mem.trimEnd(u8, bytes[PrefixLen .. PrefixLen + header.header_len], " ");
+    try std.testing.expectEqualStrings("{\"__metadata__\":{\"format\":\"1\",\"source_revision\":\"abc\"},\"a_float\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},\"z_float\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[4,12]},\"a_half\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[12,14]}}", header_json);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13, 14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, bytes[PrefixLen + @as(usize, @intCast(header.header_len)) ..]);
+}
+
+test "writer rejects duplicate names and unsupported dtypes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const duplicate = [_]tensor_data_t{
+        .{ .name = "same", .dtype = .U8, .shape = &.{1}, .data = &.{1} },
+        .{ .name = "same", .dtype = .U8, .shape = &.{1}, .data = &.{2} },
+    };
+    try std.testing.expectError(error.DuplicateName, serialize(arena.allocator(), &duplicate, null));
+    const unsupported = [_]tensor_data_t{
+        .{ .name = "packed", .dtype = .F4, .shape = &.{2}, .data = &.{1} },
+    };
+    try std.testing.expectError(error.UnsupportedDtype, serialize(arena.allocator(), &unsupported, null));
+}
+
+test "writer rejects invalid UTF-8 in names and metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const invalid_name = [_]tensor_data_t{
+        .{ .name = &.{0xff}, .dtype = .U8, .shape = &.{1}, .data = &.{1} },
+    };
+    try std.testing.expectError(error.InvalidUtf8, serialize(arena.allocator(), &invalid_name, null));
+    const tensors = [_]tensor_data_t{
+        .{ .name = "ok", .dtype = .U8, .shape = &.{1}, .data = &.{1} },
+    };
+    const invalid_metadata_key = [_]metadata_entry_t{
+        .{ .key = &.{0xff}, .value = "value" },
+    };
+    try std.testing.expectError(error.InvalidUtf8, serialize(arena.allocator(), &tensors, &invalid_metadata_key));
+    const invalid_metadata_value = [_]metadata_entry_t{
+        .{ .key = "key", .value = &.{0xff} },
+    };
+    try std.testing.expectError(error.InvalidUtf8, serialize(arena.allocator(), &tensors, &invalid_metadata_value));
 }

@@ -278,7 +278,7 @@ Trained tokenizers keep the structure of the released OWT configuration, with th
 
 **Codes.** `VQVAE.encode` runs the encoder, the pre-quant norm and `Q.z_to_idx`. Per level it downsamples the residual, takes the nearest code, upsamples and applies `quant_resi`, and subtracts (`ncm_facts.md` C4). Indices are concatenated with level 0 first.
 
-**Utilization counters.** The reference's `codebook_hit` buffers count uses since the buffer was created and are never reset (`quant.py` lines 522 and 534 to 541). The utilization of decision D37 is therefore measured on the validation split with fresh counts, and never read from those buffers.
+**Utilization counters.** The reference's `codebook_hit` buffers mark codes visited since the buffer was created and are never reset (`quant.py` lines 522 and 534 to 541). The utilization of decision D37 is therefore measured on the validation split with fresh counts, and never read from those buffers.
 
 **Reference defect.** `VQVAE.reconstruct` (`models/vqvae.py` line 116) unpacks three of the five values that `self.vq` returns (`quant.py` lines 543 to 549), so it raises as written. ncmorph's converter and parity tests call `encode` and `forward` only. The reference's `quant.py` line 548 returns the literal 0.1 where a perplexity is expected, and nothing in ncmorph reads that value.
 
@@ -296,6 +296,8 @@ Reuse for Qwen3 needs the released `tokenizer.pt` converted to `tokenizer.safete
 6. The notices of the export follow "Licences and notices". The released tensors are MIT material.
 
 The derivation in `wmt14_tokenizer_keys.md` was written by reading the pinned code, because running it was refused in the session that wrote it. Its check is the converter run under rule 1, which the owner approves (ROADMAP, "Steps that need the owner").
+
+The owner-approved isolated conversion produced 96 tensors (85 F32 and 11 I64), with all stored tensor bytes verified on readback. `tokenizer.safetensors` is 645,767,080 bytes with SHA-256 `c5a7a9689b1c50478419efcc6908477d3c4b3d334c7299ee5e15ce51628eff35` (see `research/checks.md`, Phase 8 conversion).
 
 ## NCM generator (ncmorph's dialect)
 
@@ -497,6 +499,12 @@ Each decision names its basis. Numbers are final for this file. The decision log
 - **D20. Generator recipe and RoPE.** The paper's OWT column of Table 6 for training, with cosine decay after warmup. The generator's RoPE type and base equal the source's. Basis: Table 6 and Appendix F.1.2 (cosine). The paper does not state the warmup shape, so warmup is linear. The transplanted attention keeps its frequencies, which the source-mode test checks exactly.
 - **D21. Tokenizer recipe.** The paper's OWT column of Table 5, with a cosine decay after warmup, BF16 mixed precision and seed 42. Basis: Table 5 and Appendix C. The warmup shape is not stated in the paper, so warmup is linear.
 - **D22. Corpus, split and packing.** OpenWebText (CC0-1.0), `train` split. Validation is every document with index divisible by 1,000. Packing and shuffling as in "Training". Basis: the OWT row of the paper, and no validation split is published.
+
+- **D77. Packed training-window storage.** Store fixed-length windows outside the repository as contiguous little-endian unsigned 32-bit token IDs, with `L` IDs per window; a text index records the SHA-256 of each window's bytes in output order. Assign global document indices in lexicographic shard order and row order within each shard. Basis: token IDs fit in 32 bits for the pinned source vocabularies, and fixed-width windows allow seeded shuffling without holding the corpus in memory. The pinned OpenWebText parquet metadata contains 8,013,769 documents: 8,005,755 training and 8,014 validation documents under D22 (80 shards; see `research/checks.md`, Phase 8).
+
+- **D78. Memory-bounded VQ training.** A global batch may be processed in smaller pieces when all assignments and EMA statistics for each level are accumulated over the whole batch before that level's single EMA update. Retain the assignments and replay the batch for gradients against the updated codebooks, with one dropout cutoff and one optimizer update per global batch. Keep the dropout realization for replay. Basis: the pinned `models/quant.py` `forward` assigns against the old codebook and updates EMA once before looking up the new embeddings; a naive per-piece EMA update would change this behavior. Floating-point reduction order may differ from a monolithic batch, so a tiny comparison must verify the implementation within D53 rather than claim bitwise equality.
+
+- **D79. Resumable VQ training.** Save training checkpoints at optimizer-step boundaries outside the repository using safetensors for tensor state and JSON for scalar state, never pickle. Preserve the model, EMA and optimizer state, all random streams, current data order and position, update count, schedule and data identity; reject a mismatched resume. Publish a validated complete generation atomically and retain a previous generation. Basis: D21's full budget is long-running on the owner's hardware, and restoring all state preserves the training sequence across interruptions. A tiny interrupted-versus-uninterrupted test must verify resume behavior.
 - **D23. Input table rows.** A trained tokenizer's input table has the source's configuration `vocab_size` rows, with no padding. The released WMT14 table has 151,680 rows, which is the Qwen3 token count rounded up to 64. Basis: the source's ids are dense, and the table must cover them.
 - **D24. Unconditional prefix.** One EOS id from the family's `config.json`, so `P = 1`. Basis: paper Table 6 (`P = 1` for OWT) and `scripts/eval_shard.py` line 157.
 - **D25. Decoding.** Remove EOS and PAD ids, decode with the family's tokenizer and `skip_special_tokens`, and do not cut at EOS for OWT. Basis: `scripts/eval_shard.py` lines 130 to 134 and `owt.yaml` line 181.
